@@ -2,8 +2,7 @@
 from __future__ import annotations
 import shutil
 
-from baseline2_ddm import run_baseline3_ddm_exact as run_baseline2_ddm_exact
-from baseline3_easm_exact import run_baseline3_easm_exact
+from baseline2_EASM import run_baseline2_easm_exact
 # =============================
 # Standard Library
 # =============================
