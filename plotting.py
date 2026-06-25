@@ -400,3 +400,330 @@ def plot_assignments(G, pos, switches, controllers,
     plt.close(fig)
 
     return load_dev_init, load_dev_final
+
+
+def plot_final_vs_recovery_assignment(
+    G, pos, switches, controllers,
+    final_assign,
+    recovery_assign,
+    loads,
+    final_loads,
+    recovery_loads,
+    topology_name,
+    save_dir,
+    controller_capacity,
+    failed_controller,
+    backup_controller,
+    backup_capacity=None,
+    backup_pos=None,
+    file_tag=None,
+):
+    os.makedirs(save_dir, exist_ok=True)
+
+    pos2 = dict(pos)
+
+    if backup_controller is not None and backup_controller not in pos2:
+        affected = [s for s in switches if recovery_assign.get(s) == backup_controller and s in pos2]
+        if affected:
+            xs = [pos2[s][0] for s in affected]
+            ys = [pos2[s][1] for s in affected]
+            cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
+        else:
+            xs0, ys0 = zip(*pos2.values())
+            cx, cy = max(xs0), sum(ys0) / len(ys0)
+
+        xs0, ys0 = zip(*pos2.values())
+        span0 = max(max(xs0) - min(xs0), max(ys0) - min(ys0))
+        pos2[backup_controller] = backup_pos if backup_pos else (cx + 0.12 * span0, cy)
+
+    original_controllers = list(dict.fromkeys(controllers))
+
+    active_recovery_controllers = [
+        c for c in original_controllers
+        if c != failed_controller
+    ]
+
+    if backup_controller is not None and backup_controller not in active_recovery_controllers:
+        active_recovery_controllers.append(backup_controller)
+
+    all_plot_controllers = list(dict.fromkeys(original_controllers + active_recovery_controllers))
+
+    if backup_capacity is not None and backup_controller is not None:
+        controller_capacity = dict(controller_capacity)
+        controller_capacity[backup_controller] = backup_capacity
+
+    fig, (ax1, ax2) = plt.subplots(
+        1, 2,
+        figsize=(24, 12),
+        dpi=300,
+        sharex=True,
+        sharey=True
+    )
+    plt.subplots_adjust(wspace=0.05)
+
+    for ax in (ax1, ax2):
+        ax.axis("off")
+        ax.set_aspect("equal")
+
+    xs, ys = zip(*pos2.values())
+    span = max(max(xs) - min(xs), max(ys) - min(ys))
+    node_radius = span * 0.02
+
+    color_list = list(mcolors.TABLEAU_COLORS.values()) + list(mcolors.CSS4_COLORS.values())
+    controller_colors = {
+        c: color_list[i % len(color_list)]
+        for i, c in enumerate(all_plot_controllers)
+    }
+
+    failed_orphan_switches = {
+        s for s in switches
+        if final_assign.get(s) == failed_controller
+    }
+
+    planned_switches = {
+        s for s in switches
+        if final_assign.get(s) == failed_controller
+        and backup_controller is not None
+        and recovery_assign.get(s) == backup_controller
+    }
+
+    def draw_failed_controller_box(ax, square_side):
+        if failed_controller not in pos2:
+            return
+
+        x, y = pos2[failed_controller]
+
+        failed_box = mpatches.Rectangle(
+            (x - square_side / 2, y - square_side / 2),
+            square_side,
+            square_side,
+            facecolor="white",
+            edgecolor="red",
+            linewidth=1.8,
+            linestyle="--",
+            zorder=2
+        )
+        ax.add_patch(failed_box)
+
+        ax.text(
+            x,
+            y + square_side / 2 + node_radius * 1.3,
+            "FAILED",
+            fontsize=10,
+            fontweight="bold",
+            color="red",
+            ha="center",
+            va="bottom",
+            zorder=8
+        )
+
+    def draw_one(ax, assign, loads_map, active_ctrls, is_recovery=False):
+        controller_texts = []
+
+        nx.draw_networkx_edges(
+            G, pos2, ax=ax,
+            edge_color="black",
+            width=0.6
+        )
+
+        if is_recovery and backup_controller is not None:
+            bx, by = pos2[backup_controller]
+            for s in planned_switches:
+                if s in pos2:
+                    sx, sy = pos2[s]
+                    ax.plot(
+                        [sx, bx], [sy, by],
+                        linestyle="--",
+                        linewidth=1.4,
+                        color=controller_colors[backup_controller],
+                        zorder=1
+                    )
+
+        for n in switches:
+            if n not in pos2:
+                continue
+
+            x, y = pos2[n]
+            c = assign.get(n, final_assign.get(n))
+
+            if (not is_recovery) and n in failed_orphan_switches:
+                face = "white"
+            else:
+                face = controller_colors.get(c, "lightgray")
+
+            circle = mpatches.Circle(
+                (x, y),
+                node_radius,
+                facecolor=face,
+                edgecolor="black",
+                linewidth=1.2,
+                zorder=3
+            )
+            ax.add_patch(circle)
+
+            ax.text(
+                x, y, str(n),
+                fontsize=10,
+                fontweight="bold",
+                ha="center",
+                va="center",
+                zorder=5
+            )
+
+        circle_diameter = 2 * node_radius
+        square_side = 1.2 * circle_diameter
+
+        for c in active_ctrls:
+            if c not in pos2:
+                continue
+
+            if (not is_recovery) and c == failed_controller:
+                continue
+
+            x, y = pos2[c]
+
+            square = mpatches.Rectangle(
+                (x - square_side / 2, y - square_side / 2),
+                square_side,
+                square_side,
+                facecolor=controller_colors[c],
+                edgecolor="black",
+                linewidth=1.5,
+                alpha=0.9,
+                zorder=2
+            )
+            ax.add_patch(square)
+
+            circle = mpatches.Circle(
+                (x, y),
+                node_radius,
+                facecolor=controller_colors[c],
+                edgecolor="black",
+                linewidth=1.2,
+                zorder=3
+            )
+            ax.add_patch(circle)
+
+            ax.text(
+                x,
+                y + square_side / 2 + node_radius * 0.4,
+                f"C{c}",
+                fontsize=11,
+                fontweight="bold",
+                ha="center",
+                va="bottom"
+            )
+
+            load_val = round(loads_map.get(c, 0), 1)
+            cap_c = controller_capacity.get(c, 0) if isinstance(controller_capacity, dict) else controller_capacity
+            threshold = delta * cap_c
+            txt_color = "red" if load_val > threshold else "green"
+
+            load_label = ax.text(
+                x,
+                y + square_side / 2 + node_radius * 1.2,
+                f"{load_val}",
+                fontsize=10,
+                ha="center",
+                va="bottom",
+                color=txt_color,
+                fontweight="bold"
+            )
+            controller_texts.append(load_label)
+
+        if not is_recovery:
+            draw_failed_controller_box(ax, square_side)
+
+        if is_recovery:
+            draw_failed_controller_box(ax, square_side)
+
+        adjust_text(
+            controller_texts,
+            ax=ax,
+            expand_points=(1.02, 1.05),
+            force_text=0.05,
+            only_move={"texts": "y"}
+        )
+
+    load_dev_final = compute_load_deviation(final_assign, loads)
+    load_dev_recovery = compute_load_deviation(recovery_assign, loads)
+
+    draw_one(ax1, final_assign, final_loads, original_controllers, is_recovery=False)
+    draw_one(ax2, recovery_assign, recovery_loads, active_recovery_controllers, is_recovery=True)
+
+    ax1.set_title(f"Final Association\nLoad Dev: {load_dev_final}", fontsize=20)
+    ax2.set_title(
+        f"Planned Recovery Association Failure of C{failed_controller}\n"
+        f"Load Dev: {load_dev_recovery}",
+        fontsize=20
+    )
+
+    summary_handles = [
+        Line2D([], [], linestyle="none",
+               label=f"Nodes: {G.number_of_nodes()} | Failed Controller: C{failed_controller}"),
+        Line2D([], [], linestyle="none",
+               label=f"Load deviation — final: {load_dev_final} | recovery: {load_dev_recovery}")
+    ]
+
+    icon_handles = [
+        Line2D([0], [0], marker="s", linestyle="", color="w",
+               markerfacecolor="lightgray", markeredgecolor="black",
+               markersize=12, label="Controller (Square)"),
+        Line2D([0], [0], marker="o", linestyle="", color="w",
+               markerfacecolor="gray", markeredgecolor="black",
+               markersize=10, label="Switch (Circle)"),
+        Line2D([0], [0], marker="s", linestyle="--", color="red",
+               markerfacecolor="white", markeredgecolor="red",
+               markersize=12, label=f"Failed C{failed_controller}")
+    ]
+
+    if backup_controller is not None:
+        icon_handles.append(
+            Line2D([0], [0], linestyle="--",
+                   color=controller_colors[backup_controller],
+                   linewidth=1.4,
+                   label=f"Planned links to C{backup_controller}")
+        )
+
+    controller_handles = []
+    seen_legend_ctrls = set()
+
+    for c in active_recovery_controllers:
+        if c in seen_legend_ctrls:
+            continue
+        seen_legend_ctrls.add(c)
+
+        cap_c = controller_capacity.get(c, 0) if isinstance(controller_capacity, dict) else controller_capacity
+        usable = round(delta * cap_c, 1)
+
+        suffix = " New Backup" if c == backup_controller else ""
+
+        controller_handles.append(
+            Line2D([0], [0],
+                   marker="s",
+                   linestyle="",
+                   markerfacecolor=controller_colors[c],
+                   markeredgecolor="black",
+                   markersize=12,
+                   label=f"C{c}{suffix}: total={round(cap_c,1)}, usable={usable}")
+        )
+
+    fig.legend(
+        handles=summary_handles + icon_handles + controller_handles,
+        loc="lower center",
+        bbox_to_anchor=(0.5, -0.07),
+        fontsize=12,
+        frameon=True,
+        ncol=1
+    )
+
+    tag = f"_{file_tag}" if file_tag else ""
+    base_path = os.path.join(
+        save_dir,
+        f"{topology_name}{tag}_failC{failed_controller}_backupC{backup_controller}"
+    )
+
+    save_poster_figures(fig, base_path)
+    plt.close(fig)
+
+    return load_dev_final, load_dev_recovery

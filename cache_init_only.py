@@ -18,7 +18,7 @@ def compute_or_load_init_only(
     master_seed: int,
     seeds: Dict[str, int],
     cost_mode: str,
-    get_min_controllers_and_assignment_fn: Callable[..., Tuple[int, List[int], Dict[int, float], Dict[int, int]]],
+    get_min_controllers_and_assignment_fn: Callable[..., Tuple[int, List[int], Dict[int, float], Dict[int, int], Dict[int, float], str]],
     loads: Dict[int, float],
     *,
     use_cache: bool = True,
@@ -90,7 +90,12 @@ def compute_or_load_init_only(
 
                 loads_used = cached_loads if (prefer_cached_loads and cached_loads) else loads
 
-                return controllers, capacities, init_assign, cachefile, loads_used, steiner_data, "OPTIMAL"
+                node_capacities = {
+                    int(k): float(v)
+                    for k, v in data.get("node_capacities", capacities).items()
+                }
+
+                return controllers, capacities, init_assign, cachefile, loads_used, steiner_data, "OPTIMAL", node_capacities
         except FileNotFoundError:
             pass
         except Exception:
@@ -99,7 +104,7 @@ def compute_or_load_init_only(
 
     # ---------- SLOW PATH: compute fresh (expects 4-tuple everywhere) ----------
     try:
-        kmin, controllers, capacities, init_assign,status_cs = get_min_controllers_and_assignment_fn(
+        kmin, controllers, capacities, init_assign,node_capacities,status_cs = get_min_controllers_and_assignment_fn(
             G=G,
             loads=loads,
             topology_name=topo_name,
@@ -109,7 +114,7 @@ def compute_or_load_init_only(
             seeds=seeds,  # ok if callee ignores
         )
         if status_cs != "OPTIMAL":
-            return controllers, capacities, init_assign, cachefile, loads, {}, status_cs
+            return controllers, capacities, init_assign, cachefile, loads, {}, status_cs,node_capacities
         tree_edges, tree_total, steiner_nodes, const_ms = run_steiner_constant_penalty(
             G,
             controllers,
@@ -123,27 +128,14 @@ def compute_or_load_init_only(
             "tree_total": float(tree_total),
             "steiner_nodes": list(map(int, steiner_nodes)),
             "const_ms": float(const_ms),
-        }        
-    except TypeError:
-        # legacy signature without kwargs (still 4-tuple by your new contract)
-        kmin, controllers, capacities, init_assign,status_cs = get_min_controllers_and_assignment_fn(
-            G=G, loads=loads, topology_name=topo_name
-        )
-        if status_cs != "OPTIMAL":
-            return controllers, capacities, init_assign, cachefile, loads, {}, status_cs
-        tree_edges, tree_total, steiner_nodes, const_ms = run_steiner_constant_penalty(
-            G,
-            controllers,
-            cost_mode=cost_mode,
-            two_way=True
-        )
-
-        steiner_data = {
-            "tree_edges": tree_edges,
-            "tree_total": float(tree_total),
-            "steiner_nodes": list(map(int, steiner_nodes)),
-            "const_ms": float(const_ms),
-        }
+        }   
+         
+    except TypeError as e:
+        raise RuntimeError(
+            "get_min_controllers_and_assignment must return "
+            "(kmin, controllers, capacities, init_assign, node_capacities, status_cs). "
+            "Update controller_selection_module.py accordingly."
+        ) from e
 
     # ---------- write cache (init + loads only) ----------
     if use_cache:
@@ -154,8 +146,9 @@ def compute_or_load_init_only(
             "init_assign": {int(k): int(v) for k, v in (init_assign or {}).items()},
             "loads": {int(k): float(v) for k, v in (loads or {}).items()},
             "steiner": steiner_data,
+            "node_capacities": {int(k): float(v) for k, v in (node_capacities or {}).items()},
         }
         with open(cachefile, "w") as fh:
             json.dump(obj, fh, indent=2)
 
-    return controllers, capacities, init_assign, cachefile, loads, steiner_data,status_cs
+    return controllers, capacities, init_assign, cachefile, loads, steiner_data,status_cs,node_capacities

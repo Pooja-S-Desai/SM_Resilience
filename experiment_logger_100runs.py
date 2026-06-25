@@ -418,3 +418,116 @@ def log_failure(algo, status, run_index, topo_name, G_run, alpha, beta, k_path_c
         prop_delay_max_ms=0.0, queue_delay_max_ms=0.0, sync_delay_ms=0.0,
         ctrl_rt_mean_ms=0.0, ctrl_rt_max_ms=0.0, ctrl_rt_p95_ms=0.0,
     )
+
+
+def _write_resilience_debug_log(
+    *,
+    log_file,
+    topology_name,
+    run_index,
+    controllers,
+    switches,
+    loads,
+    capacities,
+    final_loads,
+    bkp,
+    residual,
+    backup_cost_expr,
+    residual_cost_expr,
+    post_failure_balance_obj,
+    resiliency_obj,
+    gamma_res,
+):
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+
+    with open(log_file, "a") as fh:
+
+        def w(line=""):
+            fh.write(str(line) + "\n")
+
+        w("\n" + "="*90)
+        w(f"TOPOLOGY={topology_name} | RUN={run_index}")
+        w("RESILIENCY PLAN")
+        w("="*90)
+
+        for j in controllers:
+
+            w(f"\nFAILED CONTROLLER {j}")
+
+            backup_load = 0.0
+            residual_total = 0.0
+            survivor_loads = {}
+
+            for k in controllers:
+                if k != j:
+                    survivor_loads[k] = final_loads[k]
+
+            w("BACKUPS:")
+            found_backup = False
+
+            for s in switches:
+                for k in controllers:
+                    if k == j:
+                        continue
+
+                    if (s, j, k) in bkp and bkp[s, j, k].X > 0.5:
+                        w(f"  S{s} (load={loads[s]:.2f}) --> C{k}")
+                        backup_load += float(loads[s])
+                        survivor_loads[k] += float(loads[s])
+                        found_backup = True
+
+            if not found_backup:
+                w("  None")
+
+            w(f"Total Backup Load = {backup_load:.2f}")
+
+            w("RESIDUALS:")
+            residual_switches = []
+
+            for s in switches:
+                if (s, j) in residual and residual[s, j].X > 0.5:
+                    residual_switches.append(s)
+                    residual_total += float(loads[s])
+                    w(f"  S{s} (load={loads[s]:.2f})")
+
+            if not residual_switches:
+                w("  None")
+
+            w(f"Residual Load = {residual_total:.2f}")
+
+            w("POST-FAILURE LOADS:")
+
+            for k in controllers:
+                if k == j:
+                    continue
+
+                util = survivor_loads[k] / float(capacities[k])
+
+                w(
+                    f"  C{k}: "
+                    f"load={survivor_loads[k]:.2f} "
+                    f"cap={capacities[k]:.2f} "
+                    f"util={util:.3f}"
+                )
+
+            if survivor_loads:
+                mx = max(survivor_loads.values())
+                mn = min(survivor_loads.values())
+                mean_load = sum(survivor_loads.values()) / len(survivor_loads)
+
+                w(
+                    f"POSTFAIL MAX={mx:.2f} "
+                    f"MIN={mn:.2f} "
+                    f"MAX-MIN={mx-mn:.2f} "
+                    f"MEAN={mean_load:.2f}"
+                )
+
+        w("\n" + "="*90)
+        w("RESILIENCY OBJECTIVES")
+        w("="*90)
+        w(f"Backup Cost           = {backup_cost_expr.getValue():.4f}")
+        w(f"Residual Cost         = {residual_cost_expr.getValue():.4f}")
+        w(f"Post-Failure Balance  = {post_failure_balance_obj.getValue():.4f}")
+        w(f"Total Resiliency Obj  = {resiliency_obj.getValue():.4f}")
+        w(f"gamma_res             = {gamma_res}")
+        w("="*90)

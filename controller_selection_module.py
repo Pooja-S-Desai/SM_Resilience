@@ -80,7 +80,7 @@ def _build_feasible_imbalanced_fallback(G, loads, estimated_k, pivot_capacity):
         overloaded = [hot]
 
     print(f"🛟 FALLBACK controller selection used; overloaded controllers: {overloaded}")
-    return len(controllers), controllers, capacities, assignment, "OPTIMAL"
+    return min_controllers, selected, assigned_capacities, initial_assignment, node_capacities, "OPTIMAL"
 
 def get_randomized_uniform_capacity_from_initial(initial_capacity, spread, num_options, *, seed: int):
     """
@@ -143,7 +143,7 @@ def get_min_controllers_and_assignment(
 
     num_nodes = len(G.nodes())
 
-    estimated_k = max(2, math.ceil(0.15 * num_nodes))
+    estimated_k = max(2, math.ceil(0.12 * num_nodes))
     
 
     # Step 1: Calculate pivot and generate capacity options
@@ -264,7 +264,7 @@ def get_min_controllers_and_assignment(
         if selected and initial_assignment:
             print(f"✔ SUCCESS: Initial assignment successful for {topology_name}")
             print(f"⚖️ Initial overloaded controllers (>{CAPACITY_THRESHOLD:.0%}): {overloaded_selected}")
-            return min_controllers, selected, assigned_capacities, initial_assignment, "OPTIMAL"
+            return min_controllers, selected, assigned_capacities, initial_assignment, node_capacities, "OPTIMAL"
         else:
             print(f"❌ Initial assignment failed for {topology_name}")
             return None, [], {}, {}, "FAILED_INIT_ASSIGNMENT"

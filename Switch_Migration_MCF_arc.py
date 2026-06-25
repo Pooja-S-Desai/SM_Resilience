@@ -15,9 +15,11 @@ from helpers import (
     FIBER_SEC_PER_KM,
     TIME_LIMIT as time_limit
 )
+from experiment_logger_100runs import  _write_resilience_debug_log
 from rt_metrics import build_paths_sc_from_switch_paths
-
+from plotting import plot_final_vs_recovery_assignment
 from rt_metrics import flows_to_usage_and_rtt
+from collections import defaultdict
 def _compute_usage_from_solution(f, commodity_pairs, arcs, edge_caps_e):
     """
     Uses solved f[...] (tupledict of gurobi vars) to compute undirected per-link usage.
@@ -167,7 +169,18 @@ def run_migration_optimizer_integrated_mcf_arc(
 
     allow_path_splitting=True,
     alpha:float,
-    beta:float 
+    beta:float,
+    gamma_res: float = 1.0 ,
+    run_index: int = 0,
+    resilience_log_dir: str | None = None,
+
+    # plotting from MCF-ARC only
+    plot_recovery: bool = False,
+    plot_pos: dict | None = None,
+    plot_save_dir: str | None = None,
+    plot_topology_name: str | None = None,
+    plot_file_tag: str | None = None,
+    node_capacities: dict | None = None,
 ):
     """
     Arc-based integrated assignment + MCF + RT variables.
@@ -584,19 +597,214 @@ def run_migration_optimizer_integrated_mcf_arc(
         + float(w_rt) * delta_mean_rt_pos
     )
 
-    # -----------------------------
-    # Final objective: alpha*base + beta*migration
-    # -----------------------------
-    a = alpha; b = beta
-    a = max(0.0, a); b = max(0.0, b)
-    s_ab = a + b
-    if s_ab == 0.0:
-        a, b = 1.0, 0.0
+
+
+    # ============================================================
+    # PROACTIVE RESILIENCY PLANNING
+    # Same optimization:
+    # - each controller j is considered as a possible failed controller
+    # - switches primarily assigned to j are assigned to backup controller k
+    # - if no existing controller can absorb them, residual[s,j] = 1
+    # - headroom is flushed per failure case because constraints are per j
+    # ============================================================
+
+    backup_pairs = [
+        (s, j, k)
+        for s in switches
+        for j in controllers
+        for k in controllers
+        if k != j and (s, j) in y
+    ]
+
+    bkp = m.addVars(backup_pairs, vtype=GRB.BINARY, name="backup")
+
+    residual = m.addVars(
+        [(s, j) for s in switches for j in controllers if (s, j) in y],
+        vtype=GRB.BINARY,
+        name="residual_backup"
+    )
+    # ---------------------------------------------------------
+    # Candidate residual controllers (new controller placement)
+    # ---------------------------------------------------------
+    residual_candidates = [v for v in G.nodes() if v not in controllers]
+
+    old_node_capacity = {
+        v: float(node_capacities.get(v, 0.0))
+        for v in residual_candidates
+    }
+
+    rctrl_pairs = [
+        (j, v)
+        for j in controllers
+        for v in residual_candidates
+    ]
+
+    rctrl = m.addVars(
+        rctrl_pairs,
+        vtype=GRB.BINARY,
+        name="residual_controller"
+    )
+    # If s is assigned to primary controller j:
+    # either choose one existing backup controller k,
+    # or mark switch s as residual for new-controller placement.
+    for s in switches:
+        for j in controllers:
+            if (s, j) in y:
+                m.addConstr(
+                    gp.quicksum(bkp[s, j, k] for k in controllers if k != j)
+                    + residual[s, j]
+                    == y[s, j],
+                    name=f"backup_or_residual_{s}_{j}"
+                )
+
+    # Capacity check for every single-controller failure case.
+    # For each failed controller j, surviving controller k can receive
+    # some of j's switches only if k remains within usable capacity.
+    for j in controllers:
+        for k in controllers:
+            if k == j:
+                continue
+
+            recovered_load_j_to_k = gp.quicksum(
+                float(loads[s]) * bkp[s, j, k]
+                for s in switches
+                if (s, j, k) in bkp
+            )
+
+            m.addConstr(
+                load_expr[k] + recovered_load_j_to_k
+                <= float(GLOBAL_THRESHOLD) * float(capacities[k]),
+                name=f"backup_cap_fail_{j}_to_{k}"
+            )
+
+    # ============================================================
+    # POST-FAILURE LOAD BALANCE OBJECTIVE
+    # For each failed controller j, after its orphan switches are
+    # reassigned to surviving controllers, keep survivor loads balanced.
+    # ============================================================
+
+    postfail_Lmax = {}
+    postfail_Lmin = {}
+
+    for j in controllers:
+        postfail_Lmax[j] = m.addVar(lb=0.0, name=f"postfail_Lmax_fail_{j}")
+        postfail_Lmin[j] = m.addVar(lb=0.0, name=f"postfail_Lmin_fail_{j}")
+
+        for k in controllers:
+            if k == j:
+                continue
+
+            recovered_load_j_to_k = gp.quicksum(
+                float(loads[s]) * bkp[s, j, k]
+                for s in switches
+                if (s, j, k) in bkp
+            )
+
+            post_failure_load_k = load_expr[k] + recovered_load_j_to_k
+
+            m.addConstr(
+                post_failure_load_k <= postfail_Lmax[j],
+                name=f"postfail_Lmax_fail_{j}_survivor_{k}"
+            )
+
+            m.addConstr(
+                post_failure_load_k >= postfail_Lmin[j],
+                name=f"postfail_Lmin_fail_{j}_survivor_{k}"
+            )
+
+    post_failure_balance_obj = gp.quicksum(
+        postfail_Lmax[j] - postfail_Lmin[j]
+        for j in controllers
+    )
+
+
+    # residual_load[j] is total load of switches of failed controller j
+    # that could not be backed up by existing controllers.
+    # Exact switch identities are stored by residual[s,j].
+    residual_load = {}
+    for j in controllers:
+        residual_load[j] = m.addVar(lb=0.0, name=f"residual_load_fail_{j}")
+
+        m.addConstr(
+            residual_load[j] ==
+            gp.quicksum(
+                float(loads[s]) * residual[s, j]
+                for s in switches
+                if (s, j) in residual
+            ),
+            name=f"residual_load_def_{j}"
+        )
+    for j in controllers:
+
+        # At most one new controller if controller j fails
+        m.addConstr(
+            gp.quicksum(rctrl[j, v] for v in residual_candidates) <= 1,
+            name=f"one_residual_controller_{j}"
+        )
+
+        # Residual switches imply a residual controller exists
+        for s in switches:
+            if (s, j) in residual:
+                m.addConstr(
+                    residual[s, j] <= gp.quicksum(
+                        rctrl[j, v] for v in residual_candidates
+                    ),
+                    name=f"residual_requires_controller_{s}_{j}"
+                )
+
+        # Capacity of selected residual controller
+        m.addConstr(
+            residual_load[j] <=
+            GLOBAL_THRESHOLD *
+            gp.quicksum(
+                old_node_capacity[v] * rctrl[j, v]
+                for v in residual_candidates
+            ),
+            name=f"residual_capacity_{j}"
+        )
+    # Backup cost: amount of load assigned to existing backups.
+    backup_cost_expr = gp.quicksum(
+        float(loads[s]) * bkp[s, j, k]
+        for (s, j, k) in backup_pairs
+    )
+
+    # Strong penalty: residual should happen only when existing controllers
+    # cannot absorb the switch under the capacity constraints above.
+    BIG_RES_PENALTY = 1e6
+
+    BIG_RES_LOAD = 1e6      # penalize residual load
+    BIG_RES_NODE = 1e5      # penalize opening a new controller
+
+    residual_cost_expr = (
+        BIG_RES_LOAD * gp.quicksum(residual_load[j] for j in controllers)
+        +
+        BIG_RES_NODE * gp.quicksum(rctrl[j, v] for (j, v) in rctrl_pairs)
+    )
+
+    resiliency_obj = (
+        backup_cost_expr
+        + residual_cost_expr
+        + post_failure_balance_obj
+    )
+
+
+
+    a = max(0.0, float(alpha))
+    b = max(0.0, float(beta))
+    g = max(0.0, float(gamma_res))
+
+    s_abg = a + b + g
+    if s_abg == 0.0:
+        a, b, g = 1.0, 0.0, 0.0
     else:
-        a, b = a / s_ab, b / s_ab
+        a, b, g = a / s_abg, b / s_abg, g / s_abg
 
-    m.setObjective(a * base_obj + b * migration_cost_expr, GRB.MINIMIZE)
-
+    m.setObjective(
+        a * base_obj
+        + b * migration_cost_expr
+        + g * resiliency_obj,
+        GRB.MINIMIZE
+    )
 
 
     # ============================================================
@@ -773,13 +981,135 @@ def run_migration_optimizer_integrated_mcf_arc(
         "delta_mean_rt_ms": delta_rt_total,
         "delta_mean_rt_pos_ms": delta_rt_pos,
     }
-
+    selected_residual_controller = {
+        j: v
+        for (j, v), var in rctrl.items()
+        if var.X > 0.5
+    }
     paths_new = build_paths_sc_from_switch_paths(final_assign, paths_by_switch)
+    if resilience_log_dir is not None:
+        safe_topo = str(topology_name or "topology").replace("/", "_").replace(" ", "_")
 
+        resilience_log_file = os.path.join(
+            resilience_log_dir,
+            safe_topo,
+            f"{safe_topo}_run{int(run_index):03d}_resilience_debug.log"
+        )
+
+        _write_resilience_debug_log(
+            log_file=resilience_log_file,
+            topology_name=topology_name or "topology",
+            run_index=run_index,
+            controllers=controllers,
+            switches=switches,
+            loads=loads,
+            capacities=capacities,
+            final_loads=final_loads,
+            bkp=bkp,
+            residual=residual,
+            backup_cost_expr=backup_cost_expr,
+            residual_cost_expr=residual_cost_expr,
+            post_failure_balance_obj=post_failure_balance_obj,
+            resiliency_obj=resiliency_obj,
+            gamma_res=gamma_res,
+        )
+ 
     # ============================================================
-    # FINAL RETURN (WITH STATUS)
+    # EXTRA RESILIENCE PLOTS — ONLY FROM MCF_ARC
+    # One image per failed controller
     # ============================================================
 
+    if plot_recovery and plot_pos is not None and plot_save_dir is not None:
+
+        recovery_plot_dir = os.path.join(plot_save_dir, "recovery_plots")
+        os.makedirs(recovery_plot_dir, exist_ok=True)
+
+        for failed_c in controllers:
+
+            residual_c = selected_residual_controller.get(failed_c)
+
+            orphan_switches = [
+                s for s in switches
+                if final_assign.get(s) == failed_c
+            ]
+
+            if not orphan_switches:
+                continue
+
+            recovery_assign = dict(final_assign)
+
+            # remove failed controller assignment
+            for s in orphan_switches:
+                assigned = False
+
+                # first try optimizer-selected existing backup controllers
+                for k in controllers:
+                    if k == failed_c:
+                        continue
+
+                    if (s, failed_c, k) in bkp and bkp[s, failed_c, k].X > 0.5:
+                        recovery_assign[s] = k
+                        assigned = True
+                        break
+
+                # if optimizer marked this switch as residual,
+                # assign it to optimizer-selected residual controller
+                if not assigned:
+                    if residual_c is not None and (s, failed_c) in residual:
+                        if residual[s, failed_c].X > 0.5:
+                            recovery_assign[s] = residual_c
+                            assigned = True
+
+                # safety fallback: keep it away from failed controller
+                if not assigned:
+                    recovery_assign[s] = residual_c if residual_c is not None else failed_c
+
+            recovery_loads = defaultdict(float)
+            for s, c in recovery_assign.items():
+                if c == failed_c:
+                    continue
+                recovery_loads[c] += float(loads.get(s, 0.0))
+
+            recovery_loads = dict(recovery_loads)
+
+            # controllers shown in recovery figure:
+            # remove failed controller, add residual controller if selected
+            plot_controllers = [c for c in controllers if c != failed_c]
+
+            if residual_c is not None and residual_c not in plot_controllers:
+                plot_controllers.append(residual_c)
+
+            # capacities shown in recovery figure
+            plot_controller_capacity = dict(capacities)
+
+            backup_capacity = None
+            if residual_c is not None:
+                backup_capacity = float(node_capacities.get(residual_c, 0.0))
+                plot_controller_capacity[residual_c] = backup_capacity
+
+            plot_final_vs_recovery_assignment(
+                G=G,
+                pos=plot_pos,
+                switches=switches,
+                controllers=plot_controllers,
+
+                final_assign=final_assign,
+                recovery_assign=recovery_assign,
+
+                loads=loads,
+                final_loads=final_loads,
+                recovery_loads=recovery_loads,
+
+                topology_name=plot_topology_name or topology_name or "topology",
+                save_dir=recovery_plot_dir,
+
+                controller_capacity=plot_controller_capacity,
+                failed_controller=failed_c,
+                backup_controller=residual_c,
+                backup_capacity=backup_capacity,
+
+                file_tag=plot_file_tag
+            )
     return (
         final_assign,
         final_loads,

@@ -147,7 +147,11 @@ from stress import (
 # =============================
 # Plotting / Metrics
 # =============================
-from plotting import plot_assignments, get_geographical_pos
+from plotting import (
+    plot_assignments,
+    plot_final_vs_recovery_assignment,
+    get_geographical_pos
+)
 from rt_metrics import compute_response_metrics, compute_controller_side_rt_only
 
 from logging_csv import (
@@ -331,7 +335,7 @@ def main():
 
                     # from cache file check if inital assignemnt exists else call inital assignemnt controller selection optimizer from cache.py
                     #  whatever is the current init just return here and proceed
-                    controllers, capacities, init_assign_cs, cachefile, loads, steiner_data,status_cs = compute_or_load_init_only(
+                    controllers, capacities, init_assign_cs, cachefile, loads, steiner_data,status_cs,node_capacities = compute_or_load_init_only(
                         G=G_run,
                         topo_name=topo_name,
                         master_seed=getattr(helpers, "_MASTER_SEED", args.master_seed),
@@ -1437,7 +1441,8 @@ def main():
                         mip_MCF_arc,                 # mip gap
                         mig_cost_arc,                # migration cost breakdown
                         paths_by_switch_final_arc,    # ✅ reconstructed paths for RT
-                        status_arc
+                        status_arc,
+                        
                     ) = run_migration_optimizer_integrated_mcf_arc(
                         G=G_run,
                         switches=switches,
@@ -1469,6 +1474,15 @@ def main():
 
                         alpha=alpha,
                         beta=beta,
+                        gamma_res=1.0,
+                        run_index=RUN_INDEX,
+                        resilience_log_dir=os.path.join(RESULTS_FOLDER, "resilience_logs"),
+                        plot_recovery=True,
+                        plot_pos=pos,
+                        plot_save_dir=ALG_DIR("MCF_ARC"),
+                        plot_topology_name=topo_name,
+                        plot_file_tag=f"MCF_ARC_run{RUN_INDEX:03d}_topo{idx:02d}",
+                        node_capacities=node_capacities,
                     )
 
                     solve_time_mcf_arc = time.perf_counter() - solve_start_MCF_arc
