@@ -77,9 +77,9 @@ PENALTY = 1e6
 # LOAD / TRAFFIC
 # =============================
 
-MAX_LOAD = 200
+MAX_LOAD = 190
 MIN_LOAD = 100
-MANUAL_LOAD_MEAN = 150
+MANUAL_LOAD_MEAN = 145
 
 MSG_BITS_PER_REQ = 128
 LINK_BUDGET_BITS = 100600  # ✅ choose and keep ONLY one
@@ -151,7 +151,8 @@ Objective="maxmin" #choices=["maxmin","min_max_util","min_sum_util","variance","
 
 # Controller degradation factor
 CONTROLLER_SCALE_FACTOR = 0.0
-
+HOT_UTIL_RANGE = (0.80, 0.90)      # hot controller: 80–90% utilized
+NORMAL_UTIL_RANGE = (0.55, 0.75)   # other controllers: 55–75% utilized
 # Stress identification mode
 CORE_EXPERIMENT_MODE = "structural"   # "structural" or "congestion"
 

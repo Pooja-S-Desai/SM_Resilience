@@ -4,7 +4,7 @@ import math
 import gurobipy as gp
 from gurobipy import GRB, quicksum
 from helpers import ( CAPACITY_THRESHOLD, INITIAL_ASSUMED_CONTROLLERS_FOR_CAP,
-    MAX_LOAD, CAPACITY_THRESHOLD_INITIAL,MIN_LOAD
+    MAX_LOAD, CAPACITY_THRESHOLD_INITIAL,MIN_LOAD,HOT_UTIL_RANGE,NORMAL_UTIL_RANGE
 )
 import random
 import random, numpy as np
@@ -56,12 +56,28 @@ def _build_feasible_imbalanced_fallback(G, loads, estimated_k, pivot_capacity):
         ctrl_loads[c] += float(loads.get(s, 0.0))
 
     capacities = {}
+    # for c in controllers:
+    #     load_c = max(ctrl_loads[c], 1.0)
+    #     if c == hot:
+    #         capacities[c] = max(1.0, math.ceil(load_c / 0.85))
+    #     else:
+    #         capacities[c] = max(float(pivot_capacity), math.ceil(load_c / 0.70))
+
+
+    rng = random.Random(seed_menu)
+
     for c in controllers:
         load_c = max(ctrl_loads[c], 1.0)
+
         if c == hot:
-            capacities[c] = max(1.0, math.ceil(load_c / 0.85))
+            target_util = rng.uniform(*HOT_UTIL_RANGE)
+            capacities[c] = max(1.0, math.ceil(load_c / target_util))
         else:
-            capacities[c] = max(float(pivot_capacity), math.ceil(load_c / 0.70))
+            target_util = rng.uniform(*NORMAL_UTIL_RANGE)
+            capacities[c] = max(float(pivot_capacity), math.ceil(load_c / target_util))
+
+
+
 
     total_load = sum(float(loads.get(s, 0.0)) for s in nodes)
     effective_threshold = CAPACITY_THRESHOLD_INITIAL * MCF_RHO_MAX_FOR_INIT
@@ -141,8 +157,13 @@ def get_min_controllers_and_assignment(
 
 
     num_nodes = len(G.nodes())
+    if num_nodes < 50:
+        k_percent = 0.11      # 11%
+    else:
+        k_percent = 0.08      # 8%
 
-    estimated_k = max(2, math.ceil(0.10 * num_nodes))
+    estimated_k = max(2, math.ceil(k_percent * num_nodes))
+#  estimated_k = max(2, math.ceil(0.10 * num_nodes))
     
 
     # Step 1: Calculate pivot and generate capacity options

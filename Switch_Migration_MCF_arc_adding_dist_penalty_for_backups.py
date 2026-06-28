@@ -164,7 +164,7 @@ def run_migration_optimizer_integrated_mcf_arc(
     # Link caps / demand params
     edge_caps_e: dict | None = None,
     msg_bits: int = 128,
-
+    dij: dict | None = None,
 
 
     allow_path_splitting=True,
@@ -855,11 +855,28 @@ def run_migration_optimizer_integrated_mcf_arc(
         +
         BIG_RES_NODE * gp.quicksum(rctrl[j, v] for (j, v) in rctrl_pairs)
     )
+    # Prefer nearer existing backup controllers.
+    backup_distance_cost_expr = gp.quicksum(
+        float(dij.get((s, k), 0.0)) * bkp[s, j, k]
+        for (s, j, k) in backup_pairs
+    )
+    # Prefer placing the residual controller near residual switches.
+    residual_distance_cost_expr = gp.quicksum(
+        float(dij.get((s, v), 0.0)) * residual[s, j] * rctrl[j, v]
+        for j in controllers
+        for s in switches
+        if (s, j) in residual
+        for v in residual_candidates
+    )
+    W_BACKUP_DIST = 1.0
+    W_RESIDUAL_DIST = 1.0
 
     resiliency_obj = (
         backup_cost_expr
         + residual_cost_expr
         + post_failure_balance_obj
+        + W_BACKUP_DIST * backup_distance_cost_expr
+        + W_RESIDUAL_DIST * residual_distance_cost_expr
     )
 
 

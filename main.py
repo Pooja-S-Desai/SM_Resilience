@@ -1483,6 +1483,7 @@ def main():
                         plot_topology_name=topo_name,
                         plot_file_tag=f"MCF_ARC_run{RUN_INDEX:03d}_topo{idx:02d}",
                         node_capacities=node_capacities,
+                        dij=dist_all,
                     )
 
                     solve_time_mcf_arc = time.perf_counter() - solve_start_MCF_arc
