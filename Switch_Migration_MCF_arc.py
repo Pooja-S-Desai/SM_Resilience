@@ -164,7 +164,7 @@ def run_migration_optimizer_integrated_mcf_arc(
     # Link caps / demand params
     edge_caps_e: dict | None = None,
     msg_bits: int = 128,
-
+    
 
 
     allow_path_splitting=True,
@@ -181,6 +181,7 @@ def run_migration_optimizer_integrated_mcf_arc(
     plot_topology_name: str | None = None,
     plot_file_tag: str | None = None,
     node_capacities: dict | None = None,
+    dij: dict | None = None,
 ):
     """
     Arc-based integrated assignment + MCF + RT variables.
@@ -738,54 +739,6 @@ def run_migration_optimizer_integrated_mcf_arc(
                 name=f"backup_cap_fail_{j}_to_{k}"
             )
 
-    # ============================================================
-    # POST-FAILURE LOAD BALANCE OBJECTIVE
-    # For each failed controller j, after its orphan switches are
-    # reassigned to surviving controllers, keep survivor loads balanced.
-    # ============================================================
-
-    postfail_Lmax = {}
-    postfail_Lmin = {}
-
-    for j in controllers:
-        postfail_Lmax[j] = m.addVar(lb=0.0, name=f"postfail_Lmax_fail_{j}")
-        postfail_Lmin[j] = m.addVar(lb=0.0, name=f"postfail_Lmin_fail_{j}")
-
-        for k in controllers:
-            if k == j:
-                continue
-
-            # sumof all the swicth loads moved from failed controller j to surviving controller k. 
-            # This is the total load that surviving controller k will have after the failure of controller j
-            #  and the reassignment of its switches.
-
-            recovered_load_j_to_k = gp.quicksum(
-                float(loads[s]) * bkp[s, j, k]
-                for s in switches
-                if (s, j, k) in bkp
-            )
-
-#           add the preexisiting controller lad + the newly assigned load of the failed controller switch to this controller as totoal load 
-            post_failure_load_k = load_expr[k] + recovered_load_j_to_k
-
-            m.addConstr(
-                post_failure_load_k <= postfail_Lmax[j],
-                name=f"postfail_Lmax_fail_{j}_survivor_{k}"
-            )
-
-            m.addConstr(
-                post_failure_load_k >= postfail_Lmin[j],
-                name=f"postfail_Lmin_fail_{j}_survivor_{k}"
-            )
-
-
-#   here we cannot minimize each max-min for each controller failure so we sum all the 
-#   max-min for all cj failed and try to minimized this
-    post_failure_balance_obj = gp.quicksum(
-        postfail_Lmax[j] - postfail_Lmin[j]
-        for j in controllers
-    )
-
 
     # residual_load[j] is total load of switches of failed controller j
     # that could not be backed up by existing controllers.
@@ -835,6 +788,67 @@ def run_migration_optimizer_integrated_mcf_arc(
             ),
             name=f"residual_capacity_{j}"
         )
+    # ============================================================
+    # POST-FAILURE LOAD BALANCE OBJECTIVE
+    # For each failed controller j, after its orphan switches are
+    # reassigned to surviving controllers, keep survivor loads balanced.
+    # ============================================================
+
+    postfail_Lmax = {}
+    postfail_Lmin = {}
+    BIG_LOAD = sum(float(loads[s]) for s in switches)
+    for j in controllers:
+        postfail_Lmax[j] = m.addVar(lb=0.0, name=f"postfail_Lmax_fail_{j}")
+        postfail_Lmin[j] = m.addVar(lb=0.0, name=f"postfail_Lmin_fail_{j}")
+
+        for k in controllers:
+            if k == j:
+                continue
+
+            # sumof all the swicth loads moved from failed controller j to surviving controller k. 
+            # This is the total load that surviving controller k will have after the failure of controller j
+            #  and the reassignment of its switches.
+
+            recovered_load_j_to_k = gp.quicksum(
+                float(loads[s]) * bkp[s, j, k]
+                for s in switches
+                if (s, j, k) in bkp
+            )
+
+#           add the preexisiting controller lad + the newly assigned load of the failed controller switch to this controller as totoal load 
+            post_failure_load_k = load_expr[k] + recovered_load_j_to_k
+
+            m.addConstr(
+                post_failure_load_k <= postfail_Lmax[j],
+                name=f"postfail_Lmax_fail_{j}_survivor_{k}"
+            )
+
+            m.addConstr(
+                post_failure_load_k >= postfail_Lmin[j],
+                name=f"postfail_Lmin_fail_{j}_survivor_{k}"
+            )
+        residual_exists = gp.quicksum(
+            rctrl[j, v] for v in residual_candidates
+        )
+
+        m.addConstr(
+            residual_load[j] <= postfail_Lmax[j] + BIG_LOAD * (1 - residual_exists),
+            name=f"postfail_residual_max_{j}"
+        )
+
+        m.addConstr(
+            residual_load[j] >= postfail_Lmin[j] - BIG_LOAD * (1 - residual_exists),
+            name=f"postfail_residual_min_{j}"
+        )
+
+#   here we cannot minimize each max-min for each controller failure so we sum all the 
+#   max-min for all cj failed and try to minimized this
+    post_failure_balance_obj = gp.quicksum(
+        postfail_Lmax[j] - postfail_Lmin[j]
+        for j in controllers
+    )
+
+
     # Backup cost: amount of load assigned to existing backups.
     # sum of all the swicth loads which have survival controller as backup and chosen for swict migration  
     # across all single failure cases of controllers.
@@ -855,11 +869,28 @@ def run_migration_optimizer_integrated_mcf_arc(
         +
         BIG_RES_NODE * gp.quicksum(rctrl[j, v] for (j, v) in rctrl_pairs)
     )
+    # Prefer nearer existing backup controllers.
+    backup_distance_cost_expr = gp.quicksum(
+        float(dij.get((s, k), 0.0)) * bkp[s, j, k]
+        for (s, j, k) in backup_pairs
+    )
+    # Prefer placing the residual controller near residual switches.
+    residual_distance_cost_expr = gp.quicksum(
+        float(dij.get((s, v), 0.0)) * residual[s, j] * rctrl[j, v]
+        for j in controllers
+        for s in switches
+        if (s, j) in residual
+        for v in residual_candidates
+    )
+    W_BACKUP_DIST = 1.0
+    W_RESIDUAL_DIST = 1.0
 
     resiliency_obj = (
         backup_cost_expr
         + residual_cost_expr
         + post_failure_balance_obj
+        + W_BACKUP_DIST * backup_distance_cost_expr
+        + W_RESIDUAL_DIST * residual_distance_cost_expr
     )
 
 

@@ -158,7 +158,7 @@ def get_min_controllers_and_assignment(
 
     num_nodes = len(G.nodes())
     if num_nodes < 50:
-        k_percent = 0.11      # 11%
+        k_percent = 0.14      # 11%
     else:
         k_percent = 0.08      # 8%
 
@@ -180,7 +180,7 @@ def get_min_controllers_and_assignment(
         * 1.1
     )
     _, capacity_options = get_randomized_uniform_capacity_from_initial(
-        pivot_capacity, spread=0.2, num_options=10, seed=seed_menu   # <-- seeded
+        pivot_capacity, spread=0.2, num_options=20, seed=seed_menu   # <-- seeded
     )
 
 
