@@ -1560,24 +1560,49 @@ def main():
                             controllers=controllers,
                             loads=loads,
                             capacities=capacities,
-                            init_assign=init_assign_cs,
+
+                            # MCF-ARC balanced assignment
+                            init_assign=fa_mcf_arc,
+
                             dij=dij,
-                            paths_sc=paths,
+                            paths_sc=paths_by_switch_final_arc,
                             msg_bits=MSG_BITS_PER_REQ,
-                            usable_threshold=1.0,
+
+                            usable_threshold=CAPACITY_THRESHOLD,
                             overload_threshold=0.8,
+
                             alpha=0.5,
                             gamma=0.8,
                             population_size=50,
                             generations=150,
                             mutation_rate=0.10,
+
                             default_link_failure_prob=0.01,
                             default_node_failure_prob=0.01,
                             probability_aggregate="max",
-                            enforce_capacity=False,
-                            output_dir=os.path.join(RESULTS_FOLDER, "pref_cp_ga"),
+                            enforce_capacity=True,
+
+                            output_dir=ALG_DIR("PREF_CP_GA"),
                             seed=SEEDS["run"],
                             verbose=False,
+
+                            topology_name=topo_name,
+                            run_index=RUN_INDEX,
+
+                            plot_recovery=True,
+                            plot_pos=pos,
+                            plot_save_dir=ALG_DIR("PREF_CP_GA"),
+                            plot_file_tag=(
+                                f"PREF_CP_GA_run{RUN_INDEX:03d}_topo{idx:02d}"
+                            ),
+
+                            # Same resilience log root used by MCF-ARC
+                            resilience_log_dir=os.path.join(
+                                RUN_DIR,
+                                "resilience_logs"
+                            ),
+
+                            cost_mode=ROUTING_MODE,
                         )
                         solve_time_pref = time.perf_counter() - solve_start
 
@@ -1882,7 +1907,8 @@ def main():
                                 controller_sens=0.0,
                             )
 
-                
+                # ============================================================================
+                # ==========Baseline3:FLCF===================================================
             except Exception as e:
                 print(f"❌ Error on run={RUN_INDEX} topo_idx={idx}: {type(e).__name__}({e!r})")
                 traceback.print_exc()
