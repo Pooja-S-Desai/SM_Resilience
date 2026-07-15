@@ -727,3 +727,321 @@ def plot_final_vs_recovery_assignment(
     plt.close(fig)
 
     return load_dev_final, load_dev_recovery
+
+import os
+import math
+import matplotlib.pyplot as plt
+import networkx as nx
+from matplotlib.patches import Wedge, Circle
+
+
+def _draw_fractional_switch_node(
+    ax,
+    *,
+    xy,
+    fractions,
+    controller_color_map,
+    radius,
+    residual_fraction=0.0,
+):
+    x, y = xy
+
+    start_angle = 0.0
+
+    total_fraction = sum(
+        max(0.0, float(value))
+        for value in fractions.values()
+    )
+
+    for controller, fraction in fractions.items():
+        fraction = max(0.0, float(fraction))
+
+        if fraction <= 1e-9:
+            continue
+
+        end_angle = start_angle + 360.0 * fraction
+
+        wedge = Wedge(
+            center=(x, y),
+            r=radius,
+            theta1=start_angle,
+            theta2=end_angle,
+            facecolor=controller_color_map.get(
+                int(controller),
+                "lightgray",
+            ),
+            edgecolor="black",
+            linewidth=0.8,
+            zorder=8,
+        )
+        ax.add_patch(wedge)
+        start_angle = end_angle
+
+    # Show residual/unassigned fraction in white with hatching.
+    remaining = max(
+        float(residual_fraction),
+        1.0 - total_fraction,
+        0.0,
+    )
+
+    if remaining > 1e-9:
+        end_angle = start_angle + 360.0 * remaining
+
+        wedge = Wedge(
+            center=(x, y),
+            r=radius,
+            theta1=start_angle,
+            theta2=end_angle,
+            facecolor="white",
+            edgecolor="black",
+            hatch="///",
+            linewidth=0.8,
+            zorder=8,
+        )
+        ax.add_patch(wedge)
+
+    ax.add_patch(
+        Circle(
+            (x, y),
+            radius,
+            fill=False,
+            edgecolor="black",
+            linewidth=1.0,
+            zorder=9,
+        )
+    )
+
+
+def plot_final_vs_fractional_recovery_assignment(
+    *,
+    G,
+    pos,
+    switches,
+    controllers,
+
+    final_assign,
+    fractional_recovery,
+    residual_by_switch,
+
+    loads,
+    final_loads,
+    recovery_loads,
+
+    topology_name,
+    save_dir,
+    controller_capacity,
+
+    failed_controller,
+    backup_controller=None,
+    backup_capacity=None,
+
+    file_tag=None,
+):
+    os.makedirs(save_dir, exist_ok=True)
+
+    fig, axes = plt.subplots(
+        1,
+        2,
+        figsize=(18, 9),
+    )
+
+    ax_left, ax_right = axes
+
+    # Keep a stable controller-to-color mapping.
+    cmap = plt.get_cmap("tab20")
+
+    controller_color_map = {
+        int(controller): cmap(index % 20)
+        for index, controller in enumerate(controllers)
+    }
+
+    # ---------------------------------------------------------
+    # Left: current assignment
+    # ---------------------------------------------------------
+    nx.draw_networkx_edges(
+        G,
+        pos,
+        ax=ax_left,
+        alpha=0.35,
+    )
+
+    for controller in controllers:
+        assigned_switches = [
+            switch
+            for switch, current_controller
+            in final_assign.items()
+            if int(current_controller) == int(controller)
+        ]
+
+        if assigned_switches:
+            nx.draw_networkx_nodes(
+                G,
+                pos,
+                nodelist=assigned_switches,
+                node_color=[
+                    controller_color_map[int(controller)]
+                ],
+                node_size=280,
+                edgecolors="black",
+                linewidths=0.8,
+                ax=ax_left,
+            )
+
+    nx.draw_networkx_labels(
+        G,
+        pos,
+        labels={node: str(node) for node in G.nodes()},
+        font_size=7,
+        ax=ax_left,
+    )
+
+    ax_left.set_title(
+        f"Current assignment before failure of C{failed_controller}"
+    )
+    ax_left.axis("off")
+
+    # ---------------------------------------------------------
+    # Right: fractional recovery
+    # ---------------------------------------------------------
+    nx.draw_networkx_edges(
+        G,
+        pos,
+        ax=ax_right,
+        alpha=0.35,
+    )
+
+    # Estimate a suitable pie radius from coordinate spread.
+    x_values = [float(x) for x, _ in pos.values()]
+    y_values = [float(y) for _, y in pos.values()]
+
+    x_span = max(x_values) - min(x_values) if x_values else 1.0
+    y_span = max(y_values) - min(y_values) if y_values else 1.0
+
+    radius = 0.012 * max(x_span, y_span, 1.0)
+
+    for switch in switches:
+        switch = int(switch)
+        original_controller = int(final_assign[switch])
+
+        targets = fractional_recovery.get(switch, {})
+
+        if targets:
+            residual_fraction = float(
+                residual_by_switch
+                .get(switch, {})
+                .get("residual_fraction", 0.0)
+            )
+
+            _draw_fractional_switch_node(
+                ax_right,
+                xy=pos[switch],
+                fractions=targets,
+                controller_color_map=controller_color_map,
+                radius=radius,
+                residual_fraction=residual_fraction,
+            )
+
+        elif original_controller != int(failed_controller):
+            nx.draw_networkx_nodes(
+                G,
+                pos,
+                nodelist=[switch],
+                node_color=[
+                    controller_color_map.get(
+                        original_controller,
+                        "lightgray",
+                    )
+                ],
+                node_size=280,
+                edgecolors="black",
+                linewidths=0.8,
+                ax=ax_right,
+            )
+
+        else:
+            # Failed-controller switch with no assigned fraction.
+            nx.draw_networkx_nodes(
+                G,
+                pos,
+                nodelist=[switch],
+                node_color="white",
+                node_size=280,
+                edgecolors="black",
+                linewidths=1.0,
+                ax=ax_right,
+            )
+
+    nx.draw_networkx_labels(
+        G,
+        pos,
+        labels={node: str(node) for node in G.nodes()},
+        font_size=7,
+        ax=ax_right,
+    )
+
+    ax_right.set_title(
+        f"Fractional recovery after failure of C{failed_controller}"
+    )
+    ax_right.axis("off")
+
+    # ---------------------------------------------------------
+    # Text summary
+    # ---------------------------------------------------------
+    fractional_lines = []
+
+    for switch in sorted(fractional_recovery):
+        destinations = ", ".join(
+            f"C{controller}: {fraction:.3f}"
+            for controller, fraction
+            in sorted(fractional_recovery[switch].items())
+        )
+
+        residual_fraction = float(
+            residual_by_switch
+            .get(switch, {})
+            .get("residual_fraction", 0.0)
+        )
+
+        if residual_fraction > 1e-9:
+            destinations += (
+                f", residual: {residual_fraction:.3f}"
+            )
+
+        fractional_lines.append(
+            f"S{switch} → {destinations}"
+        )
+
+    if fractional_lines:
+        fig.text(
+            0.5,
+            0.02,
+            "\n".join(fractional_lines[:20]),
+            ha="center",
+            va="bottom",
+            fontsize=8,
+        )
+
+    fig.suptitle(
+        f"{topology_name}: failure scenario C{failed_controller}",
+        fontsize=14,
+    )
+
+    fig.tight_layout(rect=(0.0, 0.08, 1.0, 0.96))
+
+    tag = file_tag or (
+        f"fractional_failC{failed_controller}"
+    )
+
+    output_file = os.path.join(
+        save_dir,
+        f"{tag}.png",
+    )
+
+    fig.savefig(
+        output_file,
+        dpi=300,
+        bbox_inches="tight",
+    )
+    plt.close(fig)
+
+    return output_file

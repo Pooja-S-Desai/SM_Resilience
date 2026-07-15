@@ -1198,3 +1198,102 @@ def run_migration_optimizer_integrated_mcf_arc(
         paths_new,
         status_msg
     )
+ 
+    # # ============================================================
+    # # EXTRA RESILIENCE PLOTS — ONLY FROM MCF_ARC
+    # # One image per failed controller
+    # # ============================================================
+
+    # if plot_recovery and plot_pos is not None and plot_save_dir is not None:
+
+    #     recovery_plot_dir = os.path.join(plot_save_dir, "recovery_plots")
+    #     os.makedirs(recovery_plot_dir, exist_ok=True)
+
+    #     for failed_c in controllers:
+
+    #         residual_c = selected_residual_controller.get(failed_c)
+
+    #         orphan_switches = [
+    #             s for s in switches
+    #             if final_assign.get(s) == failed_c
+    #         ]
+
+    #         if not orphan_switches:
+    #             continue
+
+    #         recovery_assign = dict(final_assign)
+
+    #         # remove failed controller assignment
+    #         for s in orphan_switches:
+    #             assigned = False
+
+    #             # first try optimizer-selected existing backup controllers
+    #             for k in controllers:
+    #                 if k == failed_c:
+    #                     continue
+
+    #                 if (s, failed_c, k) in bkp and bkp[s, failed_c, k].X > 0.5:
+    #                     recovery_assign[s] = k
+    #                     assigned = True
+    #                     break
+
+    #             # if optimizer marked this switch as residual,
+    #             # assign it to optimizer-selected residual controller
+    #             if not assigned:
+    #                 if residual_c is not None and (s, failed_c) in residual:
+    #                     if residual[s, failed_c].X > 0.5:
+    #                         recovery_assign[s] = residual_c
+    #                         assigned = True
+
+    #             # safety fallback: keep it away from failed controller
+    #             if not assigned:
+    #                 recovery_assign[s] = residual_c if residual_c is not None else failed_c
+
+    #         recovery_loads = defaultdict(float)
+    #         for s, c in recovery_assign.items():
+    #             if c == failed_c:
+    #                 continue
+    #             recovery_loads[c] += float(loads.get(s, 0.0))
+
+    #         recovery_loads = dict(recovery_loads)
+
+    #         # controllers shown in recovery figure:
+    #         # remove failed controller, add residual controller if selected
+    #         plot_controllers = [c for c in controllers if c != failed_c]
+
+    #         if residual_c is not None and residual_c not in plot_controllers:
+    #             plot_controllers.append(residual_c)
+
+    #         # capacities shown in recovery figure
+    #         plot_controller_capacity = dict(capacities)
+
+    #         backup_capacity = None
+    #         if residual_c is not None:
+    #             backup_capacity = float(node_capacities.get(residual_c, 0.0))
+    #             plot_controller_capacity[residual_c] = backup_capacity
+
+    #         plot_final_vs_recovery_assignment(
+    #             G=G,
+    #             pos=plot_pos,
+    #             switches=switches,
+    #             controllers=plot_controllers,
+
+    #             final_assign=final_assign,
+    #             recovery_assign=recovery_assign,
+
+    #             loads=loads,
+    #             final_loads=final_loads,
+    #             recovery_loads=recovery_loads,
+
+    #             topology_name=plot_topology_name or topology_name or "topology",
+    #             save_dir=recovery_plot_dir,
+
+    #             controller_capacity=plot_controller_capacity,
+    #             failed_controller=failed_c,
+    #             backup_controller=residual_c,
+    #             backup_capacity=backup_capacity,
+
+    #             file_tag=plot_file_tag
+    #         )
+
+

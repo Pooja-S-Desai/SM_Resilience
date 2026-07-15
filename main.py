@@ -40,7 +40,7 @@ from switch_migration_optimizer_shortest import run_migration_optimizer
 
 # Baselines / Variants
 from baseline1_FTFSM import run_baseline1_FTFSM
-from baseline2_EASM import run_baseline2_easm_exact
+from baseline2_PREF import run_baseline_pref_cp_ga_exact
 # Steiner / Sync
 from steiner_opt import run_steiner_constant_penalty
 
@@ -774,666 +774,6 @@ def main():
                                     "per_controller_ms": SYNC_DELAY_MS,
                                 },
                                 fh, indent=2)
-# ==========================================================================================================================
-                        # ===========BASELINE-1: optimization-only (load-based objective)==============
-# ============================================================================================================================                  
-                    if RUN_BASELINE1:
-                        print(f"🚀 ENTERING BASELINE1 | run={RUN_INDEX}")
-
-                        solve_start = time.perf_counter()
-                        fa_b1, paths_b1, fl_b1, meta_b1, obj_val_b1, mip_b1, status_b1 = run_baseline1_FTFSM(
-                            G=G_run,
-                            switches=switches,
-                            controllers=controllers,
-                            init_assign=init_assign_cs,
-                            loads=loads,
-                            capacities=capacities,
-                            dij=dij,
-                            Dcc=Dcc,
-                            usable_threshold=CAPACITY_THRESHOLD,
-                            rule_install_cost=0.0,
-                            epsilon=1.0,
-                            omega=controllers,
-                            time_limit=300,
-                            verbose=False,
-                            topology_name=topo_name,
-                            run_index=RUN_INDEX,
-                            plot_recovery=True,
-                            plot_pos=pos,
-                            plot_save_dir=ALG_DIR("FTFSM"),
-                            plot_file_tag=f"FTFSM_run{RUN_INDEX:03d}_topo{idx:02d}",
-                        )
-                        solve_time_b1 = time.perf_counter() - solve_start
-
-                        if "INFEASIBLE" in status_b1 or "NO_FEASIBLE" in status_b1 or "TIME_LIMIT" in status_b1:
-                            log_failure("FTFSM", status_b1, RUN_INDEX, topo_name, G_run, alpha, beta, k_path_count, sens)
-                        else:
-                            
-                            # ----- evaluation (IDENTICAL to SP) -----
-                            rt_b1 = compute_response_metrics(
-                                G_run, fa_b1, loads, capacities, paths_b1, round_trip=True,
-                                per_ctrl_ms=SYNC_DELAY_MS,
-                            )
-                            usage_b1 = usage_on_paths_undirected(G_run, paths, fa_b1, loads, MSG_BITS_PER_REQ)
-                            link_b1_stats = _link_stats(usage_b1, edge_caps)
-                            lb_b1 = _ctrl_lb(fl_b1, capacities, usable_frac=1.0)
-
-                            rtp_b1 = _rt_pstats(rt_b1)
-
-                            rt_mean_ms_b1 =  float(rt_b1.get("mean_resp", float("nan")))
-                            rt_p95_ms_b1  =  float(rtp_b1["p95"]) if rtp_b1["p95"] == rtp_b1["p95"] else float("nan")
-                            rt_max_ms_b1 = float(rt_b1.get("max_resp") or float("nan"))
-
-                            prop_mean_ms_b1 = _mean_prop_ms(rt_b1)
-                            W_mean_ms_b1    = _mean_W_ms_over_switches(rt_b1, fa_b1)
-                            queue_share_b1  = (W_mean_ms_b1 / max(1e-9, rt_mean_ms_b1)) if math.isfinite(rt_mean_ms_b1) else float("nan")
-
-                            mig_stats_b1 = _mig_stats(G_run, init_assign_cs, fa_b1, ROUTING_MODE, rt_init=init_rt, rt_final=rt_b1)
-
-                            # ---- define SP-consistent fields for logging ----
-                            mig_b1 = int(mig_stats_b1.get("count", 0))  
-                            obj_b1 = "BASELINE 1"
-                            # ---- migration-cost breakdown: DO IT ALWAYS if weights are active ----
-                            mig_cost_comp_b1 = {}
-
-                            mig_cost_comp_b1 = compute_migration_cost_components(
-                                    init_assign=init_assign_cs,
-                                    final_assign=fa_b1,
-                                    Dcc=Dcc,
-                                    rt_init=init_rt,
-                                    rt_final=rt_b1
-                                )
-                            # ---- plot (same as SP) ----
-                            plot_assignments(
-                                G_run, pos, switches, controllers,
-                                init_assign_cs, fa_b1, loads, fl_b1,
-                                topo_name, ALG_DIR("B1"), capacities,
-                                extra_title=f"B1 objective=paper_milp",
-                                file_tag=f"B1_run{RUN_INDEX:03d}_topo{idx:02d}"
-                            )
-
-                            _assert_dict("link_summary_init", link_sum_init)
-                            _assert_dict("link_summary_final_B1", summarize_link_usage(usage_b1, edge_caps))
-
-                            # =========================
-                            # BUILD controller loads (final)
-                            # =========================
-                            final_loads_b1 = defaultdict(float)
-                            for s, c in fa_b1.items():
-                                final_loads_b1[c] += float(loads.get(s, 0.0))
-
-                            final_dev_b1 = (
-                                max(final_loads_b1.values()) - min(final_loads_b1.values())
-                            ) if final_loads_b1 else 0.0
-
-                            # =========================
-                            # SAFE migration cost dict
-                            # =========================
-                            mig_cost_comp_b1 = mig_cost_comp_b1 or {}
-
-                            # =========================
-                            # CALL LOGGER
-                            # =========================
-                            log_run_to_csv(
-                                logs_dir=RESULTS_FOLDER,
-
-                                algo="B1",   # ✅ IMPORTANT
-
-                                run_index=RUN_INDEX,
-                                topo=topo_name,
-                                nodes=G_run.number_of_nodes(),
-
-                                loads_by_switch=loads,
-                                controller_set=controllers,
-                                controller_caps=capacities,
-
-                                init_assign=init_assign_cs,
-                                final_assign=fa_b1,
-
-                                init_loads_by_ctrl={},
-                                final_loads_by_ctrl=final_loads_b1,
-
-                                init_dev=init_dev,
-                                final_dev=final_dev_b1,
-
-                                obj_value=obj_val_b1,
-                                solve_time_sec=solve_time_b1,
-                                mip_gap=mip_b1,
-                                status_msg="SUCCESS",
-
-                                # ---------------- RT ----------------
-                                rt_mean_init_ms=init_mean_ms_rt,
-                                rt_mean_final_ms=rt_mean_ms_b1,
-
-                                rt_max_init_ms=rt_max_ms_init,
-                                rt_max_final_ms=rt_max_ms_b1,
-
-                                rt_p95_ms_init=rt_p95_ms_init,
-                                rt_p95_ms_final=rt_p95_ms_b1,
-                                delta_rt_p95_ms=rt_p95_ms_b1 - rt_p95_ms_init,
-
-                                # ---------------- CTRL ----------------
-                                ctrl_util_mean_init=lb_init["util_mean"],
-                                ctrl_util_mean_final=lb_b1["util_mean"],
-
-                                ctrl_util_max_init=lb_init["util_max"],
-                                ctrl_util_max_final=lb_b1["util_max"],
-                                delta_ctrl_util_max=_d(lb_b1["util_max"], lb_init["util_max"]),
-
-                                ctrl_util_p95_init=lb_init["util_p95"],
-                                ctrl_util_p95_final=lb_b1["util_p95"],
-
-                                ctrl_util_std_final=lb_b1["util_std"],
-                                ctrl_util_cov_final=lb_b1["util_cov"],
-
-                                jain_load_init=lb_init["jain"],
-                                jain_load_final=lb_b1["jain"],
-
-                                ctrl_headroom_p50_final=lb_b1["head_p50"],
-                                ctrl_headroom_p95_final=lb_b1["head_p95"],
-                                ctrl_headroom_mean_final=lb_b1["head_mean"],
-
-                                # ---------------- DELAYS ----------------
-                                prop_mean_ms_final=prop_mean_ms_b1,
-                                W_mean_ms_final=W_mean_ms_b1,
-
-                                unstable_ctrls_final=len(rt_b1.get("unstable_controllers", [])),
-
-                                # ---------------- LINK ----------------
-                                link_util_mean_used_final=link_b1_stats["mean_used"],
-                                link_util_max_final=link_b1_stats["max"],
-                                link_util_p95_final=link_b1_stats["p95"],
-                                violated_links_final=link_b1_stats["viol"],
-                                excess_viol_final=link_b1_stats["excess"],
-
-                                # ---------------- LOAD ----------------
-                                rebalanced_load_total=_rebalanced_total(lam_init, final_loads_b1),
-
-                                # ---------------- CONFIG ----------------
-                                alpha=alpha,
-                                beta=beta,
-                                k_paths=k_path_count,
-                                link_sens=sens,
-
-                                # ---------------- MIG ----------------
-                                mig_cost_components=mig_cost_comp_b1,
-                                mig_dist_mean=mig_stats_b1["dist_mean"],
-                                mig_dist_p95=mig_stats_b1["dist_p95"],
-
-                                # ---------------- RT MAP ----------------
-                                rt_init_map=T_init,
-                                rt_final_map=rt_b1["T_final_ms_by_switch"],
-
-                                # ---------------- DELAY BREAKDOWN ----------------
-                                prop_delay_max_ms=rt_b1["prop_max_ms"],
-                                queue_delay_max_ms = max(v for v in rt_b1["Wsys_by_ctrl"].values()
-                                                        if math.isfinite(v)),
-                                sync_delay_ms=SYNC_DELAY_MS,
-
-                                # ---------------- CTRL RT ----------------
-                                ctrl_rt_mean_ms=0.0,  # optional (fill later if needed)
-                                ctrl_rt_max_ms=0.0,
-                                ctrl_rt_p95_ms=0.0,
-                            )
-
-                            write_edge_usage_csv(
-                                out_csv=link_csv_file,
-                                topology=topo_name,
-                                run_index=RUN_INDEX,
-                                phase="SM",
-                                algo="B1",   
-
-                                G=G_run,
-                                usage_routed=usage_b1,
-
-                                edge_caps_uniform=edge_caps_uniform,
-                                edge_caps_before_stress=edge_caps_calibrated,
-                                edge_caps_after_stress=edge_caps_stressed,
-
-                                paths_by_switch=paths_b1,   
-
-                                usage_shortest_init=usage_shortest_init,
-                                usage_routed_init=usage_init_routed,
-
-                                ebc=ebc,
-                                stressed_edges=stressed_edges,
-
-                                alpha=alpha,
-                                beta=beta,
-                                link_sens=sens,
-                                k_paths=k_path_count,
-                                load_sens=0.0,
-                                controller_sens=0.0,
-                            )
-                            write_switch_rt_csv(
-                                switch_csv_file,
-                                topo_name,
-                                RUN_INDEX,
-                                "B1",
-                                "SM",
-
-                                # FINAL assignment + paths
-                                fa_b1,
-                                paths_b1,
-                                chosen_paths_init,   # ✅ ADD THIS
-
-                                # RT DATA (B1 uses SP-style metrics)
-                                {
-                                    # FINAL
-                                    "resp_ms_by_switch": rt_b1["T_final_ms_by_switch"],
-                                    "prop_ms_by_switch": rt_b1["prop_by_switch"],
-                                    "solver_queue_ms_by_ctrl": rt_b1["Wsys_by_ctrl"],
-                                    "queue_ms_by_ctrl": rt_b1["Wsys_by_ctrl"],
-
-                                    # INIT
-                                    "init_resp_ms_by_switch": T_init,
-                                    "init_prop_ms_by_switch": prop_init,
-                                    "init_solver_queue_ms_by_ctrl": W_init,
-                                },
-
-                                init_loads_by_switch=BASE_LOADS,
-                                scaled_loads_by_switch=loads,
-                                init_assign_by_switch=init_assign_cs,
-
-                                load_scale_alpha="0",
-
-                                alpha=alpha,
-                                beta=beta,
-                                link_sens=sens,
-                                k_paths=k_path_count,
-                                load_sens=0.0,
-                                controller_sens=0.0,
-                            )
-
-                            # =========================
-                            # BUILD switch-level queue delay (FINAL)
-                            # =========================
-                            W_b1_by_ctrl = rt_b1.get("Wsys_by_ctrl", {})
-
-                            switch_W_final = {
-                                s: W_b1_by_ctrl.get(fa_b1[s], 0.0)
-                                for s in fa_b1
-                            }
-                            write_controller_csv_reuse_switch_logs(
-                                out_csv=controller_csv_file,
-                                topology=topo_name,
-                                run_index=RUN_INDEX,
-                                algo="B1",
-                                phase="SM",
-                                controllers=controllers,
-
-                                capacities_init=BASE_CAPACITIES,
-                                capacities_final=capacities,
-
-                                loads_by_ctrl=fl_b1,
-                                switch_to_ctrl=fa_b1,
-
-                                switch_W_init=W_init,
-                                switch_W_final=switch_W_final,
-
-                                switch_loads=loads,
-                                capacity_threshold=CAPACITY_THRESHOLD,
-                                alpha=alpha,
-                                beta=beta,
-                                link_sens=sens,
-                                k_paths = k_path_count,
-                                load_sens =  0.0,
-                                controller_sens = 0.0,
-                            )
-
-
-# ==========================================================================================================================
-# ===========BASELINE-3: EASM-"Efficiency-aware Switch Migration for Balancing Controller Loads in SDN"=====================
-# ============================================================================================================================
-
-                    if RUN_BASELINE2:
-                        print(f"🚀 ENTERING BASELINE2 EASM | run={RUN_INDEX}")
-
-                        solve_start = time.perf_counter()
-
-                        (
-                            fa_easm,
-                            paths_easm_pair,
-                            paths_easm_switch,
-                            fl_easm,
-                            obj_val_easm,
-                            mig_easm,
-                            usage_easm,
-                            mip_easm,
-                            status_easm,
-                            meta_easm,
-                        ) = run_baseline2_easm_exact(
-                            G=G_run,
-                            switches=switches,
-                            controllers=controllers,
-                            loads=loads,
-                            capacities=capacities,
-                            init_assign=init_assign_cs,
-                            dij=dij,
-                            paths_sc=paths,
-                            msg_bits=MSG_BITS_PER_REQ,
-                            usable_threshold=1.0,
-                            overload_threshold=0.8,
-                            verbose=False,
-                        )
-
-                        solve_time_easm = time.perf_counter() - solve_start
-
-                        # ======================================================
-                        # MAP EASM OUTPUTS → B3 VARIABLE NAMES
-                        # ======================================================
-
-                        fa_b3 = fa_easm
-                        paths_b3 = paths_easm_pair
-                        paths_b3_switch = paths_easm_switch
-                        fl_b3 = fl_easm
-                        obj_val_b3 = obj_val_easm
-                        mig_b3 = mig_easm
-                        usage_b3 = usage_easm
-                        mip_b3 = mip_easm
-                        status_b3 = status_easm
-                        solve_time_b3 = solve_time_easm
-
-                        # ======================================================
-                        # RESPONSE-TIME EVALUATION
-                        # ======================================================
-
-                        rt_b3 = compute_response_metrics(
-                            G_run,
-                            fa_b3,
-                            loads,
-                            capacities,
-                            paths_b3,
-                            round_trip=True,
-                            per_ctrl_ms=SYNC_DELAY_MS,
-                        )
-
-                        if "INFEASIBLE" in status_b3 or "TIME_LIMIT" in status_b3:
-                            log_failure("B3", "B3_INFEASIBLE", RUN_INDEX, topo_name, G_run, alpha, beta, k_path_count, sens)
-                        else:
-                            usage_b3 = usage_on_paths_undirected(
-                                G_run, paths, fa_b3, loads, MSG_BITS_PER_REQ
-                            )
-
-                            link_b3_stats = _link_stats(usage_b3, edge_caps)
-                            lb_b3 = _ctrl_lb(fl_b3, capacities, usable_frac=1.0)
-
-                            rtp_b3 = _rt_pstats(rt_b3)
-
-                            rt_mean_ms_b3 = float(rt_b3.get("mean_resp", float("nan")))
-                            rt_p95_ms_b3  = float(rtp_b3["p95"]) if rtp_b3["p95"] == rtp_b3["p95"] else float("nan")
-                            rt_max_ms_b3  = float(rt_b3.get("max_resp" or float("nan")))
-
-                            prop_mean_ms_b3 = _mean_prop_ms(rt_b3)
-                            W_mean_ms_b3    = _mean_W_ms_over_switches(rt_b3, fa_b3)
-
-                            mig_stats_b3 = _mig_stats(
-                                G_run,
-                                init_assign_cs,
-                                fa_b3,
-                                ROUTING_MODE,
-                                rt_init=init_rt,
-                                rt_final=rt_b3
-                            )
-
-                            mig_b3 = int(mig_stats_b3.get("count", 0))
-                            obj_b3 = obj_val_b3
-
-                            mig_cost_comp_b3 = compute_migration_cost_components(
-                                init_assign=init_assign_cs,
-                                final_assign=fa_b3,
-                                Dcc=Dcc,
-                                rt_init=init_rt,
-                                rt_final=rt_b3
-                            ) or {}
-
-                            # ======================================================
-                            # PLOT
-                            # ======================================================
-
-                            plot_assignments(
-                                G_run, pos, switches, controllers,
-                                init_assign_cs, fa_b3, loads, fl_b3,
-                                topo_name, ALG_DIR("B3"), capacities,
-                                extra_title=f"B3 objective=EASM efficiency-aware heuristic",
-                                file_tag=f"B3_run{RUN_INDEX:03d}_topo{idx:02d}"
-                            )
-
-                            _assert_dict("link_summary_init", link_sum_init)
-                            _assert_dict("link_summary_final_B3", summarize_link_usage(usage_b3, edge_caps))
-
-                            # ======================================================
-                            # FINAL CONTROLLER LOADS
-                            # ======================================================
-
-                            final_loads_b3 = defaultdict(float)
-                            for s, c in fa_b3.items():
-                                final_loads_b3[c] += float(loads.get(s, 0.0))
-
-                            final_dev_b3 = (
-                                max(final_loads_b3.values()) - min(final_loads_b3.values())
-                            ) if final_loads_b3 else 0.0
-
-                            # ======================================================
-                            # MAIN CSV LOG
-                            # ======================================================
-
-                            log_run_to_csv(
-                                logs_dir=RESULTS_FOLDER,
-
-                                algo="B3",
-
-                                run_index=RUN_INDEX,
-                                topo=topo_name,
-                                nodes=G_run.number_of_nodes(),
-
-                                loads_by_switch=loads,
-                                controller_set=controllers,
-                                controller_caps=capacities,
-
-                                init_assign=init_assign_cs,
-                                final_assign=fa_b3,
-
-                                init_loads_by_ctrl=dict(init_loads_by_ctrl),
-                                final_loads_by_ctrl=final_loads_b3,
-
-                                init_dev=init_dev,
-                                final_dev=final_dev_b3,
-
-                                obj_value=obj_val_b3,
-                                solve_time_sec=solve_time_b3,
-                                mip_gap=mip_b3,
-                                status_msg="SUCCESS",
-
-                                # ---------------- RT ----------------
-                                rt_mean_init_ms=init_mean_ms_rt,
-                                rt_mean_final_ms=rt_mean_ms_b3,
-
-                                rt_max_init_ms=rt_max_ms_init,
-                                rt_max_final_ms=rt_max_ms_b3,
-
-                                rt_p95_ms_init=rt_p95_ms_init,
-                                rt_p95_ms_final=rt_p95_ms_b3,
-                                delta_rt_p95_ms=rt_p95_ms_b3 - rt_p95_ms_init,
-
-                                # ---------------- CTRL ----------------
-                                ctrl_util_mean_init=lb_init["util_mean"],
-                                ctrl_util_mean_final=lb_b3["util_mean"],
-
-                                ctrl_util_max_init=lb_init["util_max"],
-                                ctrl_util_max_final=lb_b3["util_max"],
-                                delta_ctrl_util_max=_d(lb_b3["util_max"], lb_init["util_max"]),
-
-                                ctrl_util_p95_init=lb_init["util_p95"],
-                                ctrl_util_p95_final=lb_b3["util_p95"],
-
-                                ctrl_util_std_final=lb_b3["util_std"],
-                                ctrl_util_cov_final=lb_b3["util_cov"],
-
-                                jain_load_init=lb_init["jain"],
-                                jain_load_final=lb_b3["jain"],
-
-                                ctrl_headroom_p50_final=lb_b3["head_p50"],
-                                ctrl_headroom_p95_final=lb_b3["head_p95"],
-                                ctrl_headroom_mean_final=lb_b3["head_mean"],
-
-                                # ---------------- DELAYS ----------------
-                                prop_mean_ms_final=prop_mean_ms_b3,
-                                W_mean_ms_final=W_mean_ms_b3,
-
-                                unstable_ctrls_final=len(rt_b3.get("unstable_controllers", [])),
-
-                                # ---------------- LINK ----------------
-                                link_util_mean_used_final=link_b3_stats["mean_used"],
-                                link_util_max_final=link_b3_stats["max"],
-                                link_util_p95_final=link_b3_stats["p95"],
-                                violated_links_final=link_b3_stats["viol"],
-                                excess_viol_final=link_b3_stats["excess"],
-
-                                # ---------------- LOAD ----------------
-                                rebalanced_load_total=_rebalanced_total(lam_init, final_loads_b3),
-
-                                # ---------------- CONFIG ----------------
-                                alpha=alpha,
-                                beta=beta,
-                                k_paths=k_path_count,
-                                link_sens=sens,
-
-                                # ---------------- MIG ----------------
-                                mig_cost_components=mig_cost_comp_b3,
-                                mig_dist_mean=mig_stats_b3["dist_mean"],
-                                mig_dist_p95=mig_stats_b3["dist_p95"],
-
-                                # ---------------- RT MAP ----------------
-                                rt_init_map=T_init,
-                                rt_final_map=rt_b3["T_final_ms_by_switch"],
-
-                                # ---------------- DELAY BREAKDOWN ----------------
-                                prop_delay_max_ms=rt_b3["prop_max_ms"],
-                                queue_delay_max_ms=max(
-                                    v for v in rt_b3["Wsys_by_ctrl"].values()
-                                    if math.isfinite(v)
-                                ),
-                                sync_delay_ms=SYNC_DELAY_MS,
-
-                                # ---------------- CTRL RT ----------------
-                                ctrl_rt_mean_ms=0.0,
-                                ctrl_rt_max_ms=0.0,
-                                ctrl_rt_p95_ms=0.0,
-                            )
-
-                            # ======================================================
-                            # LINK CSV
-                            # ======================================================
-
-                            write_edge_usage_csv(
-                                out_csv=link_csv_file,
-                                topology=topo_name,
-                                run_index=RUN_INDEX,
-                                phase="SM",
-                                algo="B3",
-
-                                G=G_run,
-                                usage_routed=usage_b3,
-
-                                edge_caps_uniform=edge_caps_uniform,
-                                edge_caps_before_stress=edge_caps_calibrated,
-                                edge_caps_after_stress=edge_caps_stressed,
-
-                                paths_by_switch=paths_b3_switch,
-
-                                usage_shortest_init=usage_shortest_init,
-                                usage_routed_init=usage_init_routed,
-
-                                ebc=ebc,
-                                stressed_edges=stressed_edges,
-
-                                alpha=alpha,
-                                beta=beta,
-                                link_sens=sens,
-                                k_paths=k_path_count,
-                                load_sens=0.0,
-                                controller_sens=0.0,
-                            )
-
-                            # ======================================================
-                            # SWITCH RT CSV
-                            # ======================================================
-
-                            write_switch_rt_csv(
-                                switch_csv_file,
-                                topo_name,
-                                RUN_INDEX,
-                                "B3",
-                                "SM",
-
-                                fa_b3,
-                                paths_b3_switch,
-                                chosen_paths_init,
-
-                                {
-                                    "resp_ms_by_switch": rt_b3["T_final_ms_by_switch"],
-                                    "prop_ms_by_switch": rt_b3["prop_by_switch"],
-                                    "solver_queue_ms_by_ctrl": rt_b3["Wsys_by_ctrl"],
-                                    "queue_ms_by_ctrl": rt_b3["Wsys_by_ctrl"],
-
-                                    "init_resp_ms_by_switch": T_init,
-                                    "init_prop_ms_by_switch": prop_init,
-                                    "init_solver_queue_ms_by_ctrl": W_init,
-                                },
-
-                                init_loads_by_switch=BASE_LOADS,
-                                scaled_loads_by_switch=loads,
-                                init_assign_by_switch=init_assign_cs,
-
-                                load_scale_alpha="0",
-
-                                alpha=alpha,
-                                beta=beta,
-                                link_sens=sens,
-                                k_paths=k_path_count,
-                                load_sens=0.0,
-                                controller_sens=0.0,
-                            )
-
-                            # ======================================================
-                            # CONTROLLER CSV
-                            # ======================================================
-
-                            W_b3_by_ctrl = rt_b3.get("Wsys_by_ctrl", {})
-
-                            switch_W_final_b3 = {
-                                s: W_b3_by_ctrl.get(fa_b3[s], 0.0)
-                                for s in fa_b3
-                            }
-
-                            write_controller_csv_reuse_switch_logs(
-                                out_csv=controller_csv_file,
-                                topology=topo_name,
-                                run_index=RUN_INDEX,
-                                algo="B3",
-                                phase="SM",
-                                controllers=controllers,
-
-                                capacities_init=BASE_CAPACITIES,
-                                capacities_final=capacities,
-
-                                loads_by_ctrl=fl_b3,
-                                switch_to_ctrl=fa_b3,
-
-                                switch_W_init=W_init,
-                                switch_W_final=switch_W_final_b3,
-
-                                switch_loads=loads,
-                                capacity_threshold=CAPACITY_THRESHOLD,
-
-                                alpha=alpha,
-                                beta=beta,
-                                link_sens=sens,
-                                k_paths=k_path_count,
-                                load_sens=0.0,
-                                controller_sens=0.0,
-                            )
 
 # ==========================================================================================================================
                         # ===========Multi-commodity Flow-ARC==============
@@ -1835,8 +1175,714 @@ def main():
                             controller_sens=0.0,
                         )
 
+# ==========================================================================================================================
+                        # ===========BASELINE-1: optimization-only (load-based objective)==============
+# ============================================================================================================================                  
+                    if RUN_BASELINE1:
+                        print(f"🚀 ENTERING BASELINE1 | run={RUN_INDEX}")
 
-                # ✅ correct
+                        solve_start = time.perf_counter()
+                        # # ---------- STEP 1: normal FT-FSM load balancing ----------
+                        # fa_ftfsm_normal, paths_ftfsm_normal, fl_ftfsm_normal, meta_normal, obj_normal, mip_normal, status_normal = run_baseline1_FTFSM(
+                        #     G=G_run,
+                        #     switches=switches,
+                        #     controllers=controllers,
+                        #     init_assign=init_assign_cs,
+                        #     loads=loads,
+                        #     capacities=capacities,
+                        #     dij=dij,
+                        #     Dcc=Dcc,
+                        #     omega=[],   # no failure mode
+                        #     time_limit=300,
+                        #     verbose=False,
+                        #     topology_name=topo_name,
+                        #     run_index=RUN_INDEX,
+                        #     plot_recovery=False,
+                        #     plot_save_dir=ALG_DIR("FTFSM")
+                        # )
+
+                        # # plot initial → final load balanced
+                        # plot_assignments(
+                        #     G_run, pos, switches, controllers,
+                        #     init_assign_cs, fa_ftfsm_normal, loads, fl_ftfsm_normal,
+                        #     topo_name, ALG_DIR("FTFSM"),
+                        #     capacities,
+                        #     extra_title="FTFSM normal load balancing",
+                        #     file_tag=f"FTFSM_NORMAL_run{RUN_INDEX:03d}_topo{idx:02d}"
+                        # )
+
+
+                        # ---------- STEP 2: recovery planning from normal final ----------
+                        for failed_c in controllers:
+                            fa_b1, paths_b1, fl_b1, meta_b1, obj_val_b1, mip_b1, status_b1 = run_baseline1_FTFSM(
+                                G=G_run,
+                                switches=switches,
+                                controllers=controllers,
+                                init_assign=fa_mcf_arc,   # important
+                                loads=loads,
+                                capacities=capacities,
+                                dij=dij,
+                                Dcc=Dcc,
+                                omega=[failed_c],
+                                time_limit=300,
+                                verbose=False,
+                                topology_name=topo_name,
+                                run_index=RUN_INDEX,
+                                plot_recovery=True,
+                                plot_pos=pos,
+                                plot_save_dir=ALG_DIR("FTFSM"),
+                                plot_file_tag=f"FTFSM_RECOVERY_run{RUN_INDEX:03d}_failC{failed_c}"
+                            )                        
+                        #                         fa_b1, paths_b1, fl_b1, meta_b1, obj_val_b1, mip_b1, status_b1 = run_baseline1_FTFSM(
+                        #     G=G_run,
+                        #     switches=switches,
+                        #     controllers=controllers,
+                        #     init_assign=init_assign_cs,
+                        #     loads=loads,
+                        #     capacities=capacities,
+                        #     dij=dij,
+                        #     Dcc=Dcc,
+                        #     usable_threshold=CAPACITY_THRESHOLD,
+                        #     rule_install_cost=0.0,
+                        #     epsilon=1.0,
+                        #     omega=controllers,
+                        #     time_limit=300,
+                        #     verbose=False,
+                        #     topology_name=topo_name,
+                        #     run_index=RUN_INDEX,
+                        #     plot_recovery=True,
+                        #     plot_pos=pos,
+                        #     plot_save_dir=ALG_DIR("FTFSM"),
+                        #     plot_file_tag=f"FTFSM_run{RUN_INDEX:03d}_topo{idx:02d}",
+                        # )
+                        solve_time_b1 = time.perf_counter() - solve_start
+
+                        if "INFEASIBLE" in status_b1 or "NO_FEASIBLE" in status_b1 or "TIME_LIMIT" in status_b1:
+                            log_failure("FTFSM", status_b1, RUN_INDEX, topo_name, G_run, alpha, beta, k_path_count, sens)
+                        else:
+                            
+                            # ----- evaluation (IDENTICAL to SP) -----
+                            rt_b1 = compute_response_metrics(
+                                G_run, fa_b1, loads, capacities, paths_b1, round_trip=True,
+                                per_ctrl_ms=SYNC_DELAY_MS,
+                            )
+                            usage_b1 = usage_on_paths_undirected(G_run, paths, fa_b1, loads, MSG_BITS_PER_REQ)
+                            link_b1_stats = _link_stats(usage_b1, edge_caps)
+                            lb_b1 = _ctrl_lb(fl_b1, capacities, usable_frac=1.0)
+
+                            rtp_b1 = _rt_pstats(rt_b1)
+
+                            rt_mean_ms_b1 =  float(rt_b1.get("mean_resp", float("nan")))
+                            rt_p95_ms_b1  =  float(rtp_b1["p95"]) if rtp_b1["p95"] == rtp_b1["p95"] else float("nan")
+                            rt_max_ms_b1 = float(rt_b1.get("max_resp") or float("nan"))
+
+                            prop_mean_ms_b1 = _mean_prop_ms(rt_b1)
+                            W_mean_ms_b1    = _mean_W_ms_over_switches(rt_b1, fa_b1)
+                            queue_share_b1  = (W_mean_ms_b1 / max(1e-9, rt_mean_ms_b1)) if math.isfinite(rt_mean_ms_b1) else float("nan")
+
+                            mig_stats_b1 = _mig_stats(G_run, init_assign_cs, fa_b1, ROUTING_MODE, rt_init=init_rt, rt_final=rt_b1)
+
+                            # ---- define SP-consistent fields for logging ----
+                            mig_b1 = int(mig_stats_b1.get("count", 0))  
+                            obj_b1 = "BASELINE 1"
+                            # ---- migration-cost breakdown: DO IT ALWAYS if weights are active ----
+                            mig_cost_comp_b1 = {}
+
+                            mig_cost_comp_b1 = compute_migration_cost_components(
+                                    init_assign=init_assign_cs,
+                                    final_assign=fa_b1,
+                                    Dcc=Dcc,
+                                    rt_init=init_rt,
+                                    rt_final=rt_b1
+                                )
+                            # ---- plot (same as SP) ----
+                            plot_assignments(
+                                G_run, pos, switches, controllers,
+                                init_assign_cs, fa_b1, loads, fl_b1,
+                                topo_name, ALG_DIR("B1"), capacities,
+                                extra_title=f"B1 objective=paper_milp",
+                                file_tag=f"B1_run{RUN_INDEX:03d}_topo{idx:02d}"
+                            )
+
+                            _assert_dict("link_summary_init", link_sum_init)
+                            _assert_dict("link_summary_final_B1", summarize_link_usage(usage_b1, edge_caps))
+
+                            # =========================
+                            # BUILD controller loads (final)
+                            # =========================
+                            final_loads_b1 = defaultdict(float)
+                            for s, c in fa_b1.items():
+                                final_loads_b1[c] += float(loads.get(s, 0.0))
+
+                            final_dev_b1 = (
+                                max(final_loads_b1.values()) - min(final_loads_b1.values())
+                            ) if final_loads_b1 else 0.0
+
+                            # =========================
+                            # SAFE migration cost dict
+                            # =========================
+                            mig_cost_comp_b1 = mig_cost_comp_b1 or {}
+
+                            # =========================
+                            # CALL LOGGER
+                            # =========================
+                            log_run_to_csv(
+                                logs_dir=RESULTS_FOLDER,
+
+                                algo="B1",   # ✅ IMPORTANT
+
+                                run_index=RUN_INDEX,
+                                topo=topo_name,
+                                nodes=G_run.number_of_nodes(),
+
+                                loads_by_switch=loads,
+                                controller_set=controllers,
+                                controller_caps=capacities,
+
+                                init_assign=init_assign_cs,
+                                final_assign=fa_b1,
+
+                                init_loads_by_ctrl={},
+                                final_loads_by_ctrl=final_loads_b1,
+
+                                init_dev=init_dev,
+                                final_dev=final_dev_b1,
+
+                                obj_value=obj_val_b1,
+                                solve_time_sec=solve_time_b1,
+                                mip_gap=mip_b1,
+                                status_msg="SUCCESS",
+
+                                # ---------------- RT ----------------
+                                rt_mean_init_ms=init_mean_ms_rt,
+                                rt_mean_final_ms=rt_mean_ms_b1,
+
+                                rt_max_init_ms=rt_max_ms_init,
+                                rt_max_final_ms=rt_max_ms_b1,
+
+                                rt_p95_ms_init=rt_p95_ms_init,
+                                rt_p95_ms_final=rt_p95_ms_b1,
+                                delta_rt_p95_ms=rt_p95_ms_b1 - rt_p95_ms_init,
+
+                                # ---------------- CTRL ----------------
+                                ctrl_util_mean_init=lb_init["util_mean"],
+                                ctrl_util_mean_final=lb_b1["util_mean"],
+
+                                ctrl_util_max_init=lb_init["util_max"],
+                                ctrl_util_max_final=lb_b1["util_max"],
+                                delta_ctrl_util_max=_d(lb_b1["util_max"], lb_init["util_max"]),
+
+                                ctrl_util_p95_init=lb_init["util_p95"],
+                                ctrl_util_p95_final=lb_b1["util_p95"],
+
+                                ctrl_util_std_final=lb_b1["util_std"],
+                                ctrl_util_cov_final=lb_b1["util_cov"],
+
+                                jain_load_init=lb_init["jain"],
+                                jain_load_final=lb_b1["jain"],
+
+                                ctrl_headroom_p50_final=lb_b1["head_p50"],
+                                ctrl_headroom_p95_final=lb_b1["head_p95"],
+                                ctrl_headroom_mean_final=lb_b1["head_mean"],
+
+                                # ---------------- DELAYS ----------------
+                                prop_mean_ms_final=prop_mean_ms_b1,
+                                W_mean_ms_final=W_mean_ms_b1,
+
+                                unstable_ctrls_final=len(rt_b1.get("unstable_controllers", [])),
+
+                                # ---------------- LINK ----------------
+                                link_util_mean_used_final=link_b1_stats["mean_used"],
+                                link_util_max_final=link_b1_stats["max"],
+                                link_util_p95_final=link_b1_stats["p95"],
+                                violated_links_final=link_b1_stats["viol"],
+                                excess_viol_final=link_b1_stats["excess"],
+
+                                # ---------------- LOAD ----------------
+                                rebalanced_load_total=_rebalanced_total(lam_init, final_loads_b1),
+
+                                # ---------------- CONFIG ----------------
+                                alpha=alpha,
+                                beta=beta,
+                                k_paths=k_path_count,
+                                link_sens=sens,
+
+                                # ---------------- MIG ----------------
+                                mig_cost_components=mig_cost_comp_b1,
+                                mig_dist_mean=mig_stats_b1["dist_mean"],
+                                mig_dist_p95=mig_stats_b1["dist_p95"],
+
+                                # ---------------- RT MAP ----------------
+                                rt_init_map=T_init,
+                                rt_final_map=rt_b1["T_final_ms_by_switch"],
+
+                                # ---------------- DELAY BREAKDOWN ----------------
+                                prop_delay_max_ms=rt_b1["prop_max_ms"],
+                                queue_delay_max_ms = max(v for v in rt_b1["Wsys_by_ctrl"].values()
+                                                        if math.isfinite(v)),
+                                sync_delay_ms=SYNC_DELAY_MS,
+
+                                # ---------------- CTRL RT ----------------
+                                ctrl_rt_mean_ms=0.0,  # optional (fill later if needed)
+                                ctrl_rt_max_ms=0.0,
+                                ctrl_rt_p95_ms=0.0,
+                            )
+
+                            write_edge_usage_csv(
+                                out_csv=link_csv_file,
+                                topology=topo_name,
+                                run_index=RUN_INDEX,
+                                phase="SM",
+                                algo="B1",   
+
+                                G=G_run,
+                                usage_routed=usage_b1,
+
+                                edge_caps_uniform=edge_caps_uniform,
+                                edge_caps_before_stress=edge_caps_calibrated,
+                                edge_caps_after_stress=edge_caps_stressed,
+
+                                paths_by_switch=paths_b1,   
+
+                                usage_shortest_init=usage_shortest_init,
+                                usage_routed_init=usage_init_routed,
+
+                                ebc=ebc,
+                                stressed_edges=stressed_edges,
+
+                                alpha=alpha,
+                                beta=beta,
+                                link_sens=sens,
+                                k_paths=k_path_count,
+                                load_sens=0.0,
+                                controller_sens=0.0,
+                            )
+                            write_switch_rt_csv(
+                                switch_csv_file,
+                                topo_name,
+                                RUN_INDEX,
+                                "B1",
+                                "SM",
+
+                                # FINAL assignment + paths
+                                fa_b1,
+                                paths_b1,
+                                chosen_paths_init,   # ✅ ADD THIS
+
+                                # RT DATA (B1 uses SP-style metrics)
+                                {
+                                    # FINAL
+                                    "resp_ms_by_switch": rt_b1["T_final_ms_by_switch"],
+                                    "prop_ms_by_switch": rt_b1["prop_by_switch"],
+                                    "solver_queue_ms_by_ctrl": rt_b1["Wsys_by_ctrl"],
+                                    "queue_ms_by_ctrl": rt_b1["Wsys_by_ctrl"],
+
+                                    # INIT
+                                    "init_resp_ms_by_switch": T_init,
+                                    "init_prop_ms_by_switch": prop_init,
+                                    "init_solver_queue_ms_by_ctrl": W_init,
+                                },
+
+                                init_loads_by_switch=BASE_LOADS,
+                                scaled_loads_by_switch=loads,
+                                init_assign_by_switch=init_assign_cs,
+
+                                load_scale_alpha="0",
+
+                                alpha=alpha,
+                                beta=beta,
+                                link_sens=sens,
+                                k_paths=k_path_count,
+                                load_sens=0.0,
+                                controller_sens=0.0,
+                            )
+
+                            # =========================
+                            # BUILD switch-level queue delay (FINAL)
+                            # =========================
+                            W_b1_by_ctrl = rt_b1.get("Wsys_by_ctrl", {})
+
+                            switch_W_final = {
+                                s: W_b1_by_ctrl.get(fa_b1[s], 0.0)
+                                for s in fa_b1
+                            }
+                            write_controller_csv_reuse_switch_logs(
+                                out_csv=controller_csv_file,
+                                topology=topo_name,
+                                run_index=RUN_INDEX,
+                                algo="B1",
+                                phase="SM",
+                                controllers=controllers,
+
+                                capacities_init=BASE_CAPACITIES,
+                                capacities_final=capacities,
+
+                                loads_by_ctrl=fl_b1,
+                                switch_to_ctrl=fa_b1,
+
+                                switch_W_init=W_init,
+                                switch_W_final=switch_W_final,
+
+                                switch_loads=loads,
+                                capacity_threshold=CAPACITY_THRESHOLD,
+                                alpha=alpha,
+                                beta=beta,
+                                link_sens=sens,
+                                k_paths = k_path_count,
+                                load_sens =  0.0,
+                                controller_sens = 0.0,
+                            )
+
+
+# ==========================================================================================================================
+# ===========BASELINE-2:PREF-"Efficiency-aware Switch Migration for Balancing Controller Loads in SDN"=====================
+# ============================================================================================================================
+
+                    if RUN_BASELINE2:
+                        print(f"🚀 ENTERING BASELINE2 PREF | run={RUN_INDEX}")
+
+                        solve_start = time.perf_counter()
+
+                        (
+                            fa_b3,
+                            paths_b3,
+                            paths_b3_switch,
+                            fl_b3,
+                            obj_val_b3,
+                            mig_b3,
+                            usage_b3,
+                            mip_b3,
+                            status_b3,
+                            meta_b3,
+                        ) = run_baseline_pref_cp_ga_exact(
+                            G=G_run,
+                            switches=switches,
+                            controllers=controllers,
+                            loads=loads,
+                            capacities=capacities,
+                            init_assign=init_assign_cs,
+                            dij=dij,
+                            paths_sc=paths,
+                            msg_bits=MSG_BITS_PER_REQ,
+                            usable_threshold=1.0,
+                            overload_threshold=0.8,
+                            alpha=0.5,
+                            gamma=0.8,
+                            population_size=50,
+                            generations=150,
+                            mutation_rate=0.10,
+                            default_link_failure_prob=0.01,
+                            default_node_failure_prob=0.01,
+                            probability_aggregate="max",
+                            enforce_capacity=False,
+                            output_dir=os.path.join(RESULTS_FOLDER, "pref_cp_ga"),
+                            seed=SEEDS["run"],
+                            verbose=False,
+                        )
+                        solve_time_pref = time.perf_counter() - solve_start
+
+                        # ======================================================
+                        # RESPONSE-TIME EVALUATION
+                        # ======================================================
+
+                        rt_b3 = compute_response_metrics(
+                            G_run,
+                            fa_b3,
+                            loads,
+                            capacities,
+                            paths_b3,
+                            round_trip=True,
+                            per_ctrl_ms=SYNC_DELAY_MS,
+                        )
+
+                        if "INFEASIBLE" in status_b3 or "TIME_LIMIT" in status_b3:
+                            log_failure("B3", "B3_INFEASIBLE", RUN_INDEX, topo_name, G_run, alpha, beta, k_path_count, sens)
+                        else:
+                            usage_b3 = usage_on_paths_undirected(
+                                G_run, paths, fa_b3, loads, MSG_BITS_PER_REQ
+                            )
+
+                            link_b3_stats = _link_stats(usage_b3, edge_caps)
+                            lb_b3 = _ctrl_lb(fl_b3, capacities, usable_frac=1.0)
+
+                            rtp_b3 = _rt_pstats(rt_b3)
+
+                            rt_mean_ms_b3 = float(rt_b3.get("mean_resp", float("nan")))
+                            rt_p95_ms_b3  = float(rtp_b3["p95"]) if rtp_b3["p95"] == rtp_b3["p95"] else float("nan")
+                            rt_max_ms_b3  = float(rt_b3.get("max_resp" or float("nan")))
+
+                            prop_mean_ms_b3 = _mean_prop_ms(rt_b3)
+                            W_mean_ms_b3    = _mean_W_ms_over_switches(rt_b3, fa_b3)
+
+                            mig_stats_b3 = _mig_stats(
+                                G_run,
+                                init_assign_cs,
+                                fa_b3,
+                                ROUTING_MODE,
+                                rt_init=init_rt,
+                                rt_final=rt_b3
+                            )
+
+                            mig_b3 = int(mig_stats_b3.get("count", 0))
+                            obj_b3 = obj_val_b3
+
+                            mig_cost_comp_b3 = compute_migration_cost_components(
+                                init_assign=init_assign_cs,
+                                final_assign=fa_b3,
+                                Dcc=Dcc,
+                                rt_init=init_rt,
+                                rt_final=rt_b3
+                            ) or {}
+
+                            # ======================================================
+                            # PLOT
+                            # ======================================================
+
+                            plot_assignments(
+                                G_run, pos, switches, controllers,
+                                init_assign_cs, fa_b3, loads, fl_b3,
+                                topo_name, ALG_DIR("B3"), capacities,
+                                extra_title=f"B3 objective=EASM efficiency-aware heuristic",
+                                file_tag=f"B3_run{RUN_INDEX:03d}_topo{idx:02d}"
+                            )
+
+                            _assert_dict("link_summary_init", link_sum_init)
+                            _assert_dict("link_summary_final_B3", summarize_link_usage(usage_b3, edge_caps))
+
+                            # ======================================================
+                            # FINAL CONTROLLER LOADS
+                            # ======================================================
+
+                            final_loads_b3 = defaultdict(float)
+                            for s, c in fa_b3.items():
+                                final_loads_b3[c] += float(loads.get(s, 0.0))
+
+                            final_dev_b3 = (
+                                max(final_loads_b3.values()) - min(final_loads_b3.values())
+                            ) if final_loads_b3 else 0.0
+
+                            # ======================================================
+                            # MAIN CSV LOG
+                            # ======================================================
+
+                            log_run_to_csv(
+                                logs_dir=RESULTS_FOLDER,
+
+                                algo="B3",
+
+                                run_index=RUN_INDEX,
+                                topo=topo_name,
+                                nodes=G_run.number_of_nodes(),
+
+                                loads_by_switch=loads,
+                                controller_set=controllers,
+                                controller_caps=capacities,
+
+                                init_assign=init_assign_cs,
+                                final_assign=fa_b3,
+
+                                init_loads_by_ctrl=dict(init_loads_by_ctrl),
+                                final_loads_by_ctrl=final_loads_b3,
+
+                                init_dev=init_dev,
+                                final_dev=final_dev_b3,
+
+                                obj_value=obj_val_b3,
+                                solve_time_sec=solve_time_pref,
+                                mip_gap=mip_b3,
+                                status_msg="SUCCESS",
+
+                                # ---------------- RT ----------------
+                                rt_mean_init_ms=init_mean_ms_rt,
+                                rt_mean_final_ms=rt_mean_ms_b3,
+
+                                rt_max_init_ms=rt_max_ms_init,
+                                rt_max_final_ms=rt_max_ms_b3,
+
+                                rt_p95_ms_init=rt_p95_ms_init,
+                                rt_p95_ms_final=rt_p95_ms_b3,
+                                delta_rt_p95_ms=rt_p95_ms_b3 - rt_p95_ms_init,
+
+                                # ---------------- CTRL ----------------
+                                ctrl_util_mean_init=lb_init["util_mean"],
+                                ctrl_util_mean_final=lb_b3["util_mean"],
+
+                                ctrl_util_max_init=lb_init["util_max"],
+                                ctrl_util_max_final=lb_b3["util_max"],
+                                delta_ctrl_util_max=_d(lb_b3["util_max"], lb_init["util_max"]),
+
+                                ctrl_util_p95_init=lb_init["util_p95"],
+                                ctrl_util_p95_final=lb_b3["util_p95"],
+
+                                ctrl_util_std_final=lb_b3["util_std"],
+                                ctrl_util_cov_final=lb_b3["util_cov"],
+
+                                jain_load_init=lb_init["jain"],
+                                jain_load_final=lb_b3["jain"],
+
+                                ctrl_headroom_p50_final=lb_b3["head_p50"],
+                                ctrl_headroom_p95_final=lb_b3["head_p95"],
+                                ctrl_headroom_mean_final=lb_b3["head_mean"],
+
+                                # ---------------- DELAYS ----------------
+                                prop_mean_ms_final=prop_mean_ms_b3,
+                                W_mean_ms_final=W_mean_ms_b3,
+
+                                unstable_ctrls_final=len(rt_b3.get("unstable_controllers", [])),
+
+                                # ---------------- LINK ----------------
+                                link_util_mean_used_final=link_b3_stats["mean_used"],
+                                link_util_max_final=link_b3_stats["max"],
+                                link_util_p95_final=link_b3_stats["p95"],
+                                violated_links_final=link_b3_stats["viol"],
+                                excess_viol_final=link_b3_stats["excess"],
+
+                                # ---------------- LOAD ----------------
+                                rebalanced_load_total=_rebalanced_total(lam_init, final_loads_b3),
+
+                                # ---------------- CONFIG ----------------
+                                alpha=alpha,
+                                beta=beta,
+                                k_paths=k_path_count,
+                                link_sens=sens,
+
+                                # ---------------- MIG ----------------
+                                mig_cost_components=mig_cost_comp_b3,
+                                mig_dist_mean=mig_stats_b3["dist_mean"],
+                                mig_dist_p95=mig_stats_b3["dist_p95"],
+
+                                # ---------------- RT MAP ----------------
+                                rt_init_map=T_init,
+                                rt_final_map=rt_b3["T_final_ms_by_switch"],
+
+                                # ---------------- DELAY BREAKDOWN ----------------
+                                prop_delay_max_ms=rt_b3["prop_max_ms"],
+                                queue_delay_max_ms=max(
+                                    v for v in rt_b3["Wsys_by_ctrl"].values()
+                                    if math.isfinite(v)
+                                ),
+                                sync_delay_ms=SYNC_DELAY_MS,
+
+                                # ---------------- CTRL RT ----------------
+                                ctrl_rt_mean_ms=0.0,
+                                ctrl_rt_max_ms=0.0,
+                                ctrl_rt_p95_ms=0.0,
+                            )
+
+                            # ======================================================
+                            # LINK CSV
+                            # ======================================================
+
+                            write_edge_usage_csv(
+                                out_csv=link_csv_file,
+                                topology=topo_name,
+                                run_index=RUN_INDEX,
+                                phase="SM",
+                                algo="B3",
+
+                                G=G_run,
+                                usage_routed=usage_b3,
+
+                                edge_caps_uniform=edge_caps_uniform,
+                                edge_caps_before_stress=edge_caps_calibrated,
+                                edge_caps_after_stress=edge_caps_stressed,
+
+                                paths_by_switch=paths_b3_switch,
+
+                                usage_shortest_init=usage_shortest_init,
+                                usage_routed_init=usage_init_routed,
+
+                                ebc=ebc,
+                                stressed_edges=stressed_edges,
+
+                                alpha=alpha,
+                                beta=beta,
+                                link_sens=sens,
+                                k_paths=k_path_count,
+                                load_sens=0.0,
+                                controller_sens=0.0,
+                            )
+
+                            # ======================================================
+                            # SWITCH RT CSV
+                            # ======================================================
+
+                            write_switch_rt_csv(
+                                switch_csv_file,
+                                topo_name,
+                                RUN_INDEX,
+                                "B3",
+                                "SM",
+
+                                fa_b3,
+                                paths_b3_switch,
+                                chosen_paths_init,
+
+                                {
+                                    "resp_ms_by_switch": rt_b3["T_final_ms_by_switch"],
+                                    "prop_ms_by_switch": rt_b3["prop_by_switch"],
+                                    "solver_queue_ms_by_ctrl": rt_b3["Wsys_by_ctrl"],
+                                    "queue_ms_by_ctrl": rt_b3["Wsys_by_ctrl"],
+
+                                    "init_resp_ms_by_switch": T_init,
+                                    "init_prop_ms_by_switch": prop_init,
+                                    "init_solver_queue_ms_by_ctrl": W_init,
+                                },
+
+                                init_loads_by_switch=BASE_LOADS,
+                                scaled_loads_by_switch=loads,
+                                init_assign_by_switch=init_assign_cs,
+
+                                load_scale_alpha="0",
+
+                                alpha=alpha,
+                                beta=beta,
+                                link_sens=sens,
+                                k_paths=k_path_count,
+                                load_sens=0.0,
+                                controller_sens=0.0,
+                            )
+
+                            # ======================================================
+                            # CONTROLLER CSV
+                            # ======================================================
+
+                            W_b3_by_ctrl = rt_b3.get("Wsys_by_ctrl", {})
+
+                            switch_W_final_b3 = {
+                                s: W_b3_by_ctrl.get(fa_b3[s], 0.0)
+                                for s in fa_b3
+                            }
+
+                            write_controller_csv_reuse_switch_logs(
+                                out_csv=controller_csv_file,
+                                topology=topo_name,
+                                run_index=RUN_INDEX,
+                                algo="B3",
+                                phase="SM",
+                                controllers=controllers,
+
+                                capacities_init=BASE_CAPACITIES,
+                                capacities_final=capacities,
+
+                                loads_by_ctrl=fl_b3,
+                                switch_to_ctrl=fa_b3,
+
+                                switch_W_init=W_init,
+                                switch_W_final=switch_W_final_b3,
+
+                                switch_loads=loads,
+                                capacity_threshold=CAPACITY_THRESHOLD,
+
+                                alpha=alpha,
+                                beta=beta,
+                                link_sens=sens,
+                                k_paths=k_path_count,
+                                load_sens=0.0,
+                                controller_sens=0.0,
+                            )
+
+                
             except Exception as e:
                 print(f"❌ Error on run={RUN_INDEX} topo_idx={idx}: {type(e).__name__}({e!r})")
                 traceback.print_exc()

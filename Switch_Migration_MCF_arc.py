@@ -15,6 +15,7 @@ from helpers import (
     FIBER_SEC_PER_KM,
     TIME_LIMIT as time_limit
 )
+from failure_scenario_handler import process_failure_scenario
 from experiment_logger_100runs import  _write_resilience_debug_log
 from rt_metrics import build_paths_sc_from_switch_paths
 from plotting import plot_final_vs_recovery_assignment
@@ -1119,103 +1120,110 @@ def run_migration_optimizer_integrated_mcf_arc(
             resiliency_obj=resiliency_obj,
             gamma_res=gamma_res,
         )
- 
-    # ============================================================
-    # EXTRA RESILIENCE PLOTS — ONLY FROM MCF_ARC
-    # One image per failed controller
-    # ============================================================
 
-    if plot_recovery and plot_pos is not None and plot_save_dir is not None:
 
-        recovery_plot_dir = os.path.join(plot_save_dir, "recovery_plots")
-        os.makedirs(recovery_plot_dir, exist_ok=True)
+    failure_records = {}
 
-        for failed_c in controllers:
+    for failed_c in controllers:
+        failed_c = int(failed_c)
 
-            residual_c = selected_residual_controller.get(failed_c)
+        residual_controller = selected_residual_controller.get(
+            failed_c
+        )
 
-            orphan_switches = [
-                s for s in switches
-                if final_assign.get(s) == failed_c
-            ]
+        recovery_assignment = dict(final_assign)
+        residual_by_switch = {}
 
-            if not orphan_switches:
-                continue
+        orphan_switches = [
+            int(s)
+            for s in switches
+            if int(final_assign.get(s)) == failed_c
+        ]
 
-            recovery_assign = dict(final_assign)
+        for switch in orphan_switches:
+            assigned = False
 
-            # remove failed controller assignment
-            for s in orphan_switches:
-                assigned = False
-
-                # first try optimizer-selected existing backup controllers
-                for k in controllers:
-                    if k == failed_c:
-                        continue
-
-                    if (s, failed_c, k) in bkp and bkp[s, failed_c, k].X > 0.5:
-                        recovery_assign[s] = k
-                        assigned = True
-                        break
-
-                # if optimizer marked this switch as residual,
-                # assign it to optimizer-selected residual controller
-                if not assigned:
-                    if residual_c is not None and (s, failed_c) in residual:
-                        if residual[s, failed_c].X > 0.5:
-                            recovery_assign[s] = residual_c
-                            assigned = True
-
-                # safety fallback: keep it away from failed controller
-                if not assigned:
-                    recovery_assign[s] = residual_c if residual_c is not None else failed_c
-
-            recovery_loads = defaultdict(float)
-            for s, c in recovery_assign.items():
-                if c == failed_c:
+            for target in controllers:
+                if int(target) == failed_c:
                     continue
-                recovery_loads[c] += float(loads.get(s, 0.0))
 
-            recovery_loads = dict(recovery_loads)
+                key = (switch, failed_c, target)
 
-            # controllers shown in recovery figure:
-            # remove failed controller, add residual controller if selected
-            plot_controllers = [c for c in controllers if c != failed_c]
+                if key in bkp and bkp[key].X > 0.5:
+                    recovery_assignment[switch] = int(target)
+                    assigned = True
+                    break
 
-            if residual_c is not None and residual_c not in plot_controllers:
-                plot_controllers.append(residual_c)
+            if (
+                not assigned
+                and (switch, failed_c) in residual
+                and residual[switch, failed_c].X > 0.5
+            ):
+                residual_load_value = float(loads[switch])
 
-            # capacities shown in recovery figure
-            plot_controller_capacity = dict(capacities)
+                residual_by_switch[switch] = {
+                    "residual_fraction": 1.0,
+                    "residual_load": residual_load_value,
+                }
 
-            backup_capacity = None
-            if residual_c is not None:
-                backup_capacity = float(node_capacities.get(residual_c, 0.0))
-                plot_controller_capacity[residual_c] = backup_capacity
+                if residual_controller is not None:
+                    recovery_assignment[switch] = int(
+                        residual_controller
+                    )
 
-            plot_final_vs_recovery_assignment(
-                G=G,
-                pos=plot_pos,
-                switches=switches,
-                controllers=plot_controllers,
+        selected_backup_capacity = None
 
-                final_assign=final_assign,
-                recovery_assign=recovery_assign,
-
-                loads=loads,
-                final_loads=final_loads,
-                recovery_loads=recovery_loads,
-
-                topology_name=plot_topology_name or topology_name or "topology",
-                save_dir=recovery_plot_dir,
-
-                controller_capacity=plot_controller_capacity,
-                failed_controller=failed_c,
-                backup_controller=residual_c,
-                backup_capacity=backup_capacity,
-
-                file_tag=plot_file_tag
+        if residual_controller is not None:
+            selected_backup_capacity = float(
+                node_capacities.get(
+                    residual_controller,
+                    0.0,
+                )
             )
+
+        record = process_failure_scenario(
+            algorithm="MCF_ARC",
+            topology_name=topology_name or "topology",
+            run_index=run_index,
+            failed_controller=failed_c,
+
+            G=G,
+            pos=plot_pos,
+            switches=switches,
+            controllers=controllers,
+            loads=loads,
+            capacities=capacities,
+            usable_threshold=GLOBAL_THRESHOLD,
+
+            # The normal state after load balancing
+            initial_assignment=final_assign,
+
+            # Integral recovery plan
+            recovery_assignment=recovery_assignment,
+            fractional_assignment={},
+            residual_by_switch=residual_by_switch,
+
+            status=status_msg,
+            solve_time_sec=0.0,
+            objective_value=obj_val,
+            mip_gap=mip_gap,
+
+            backup_controller=residual_controller,
+            backup_capacity=selected_backup_capacity,
+
+            output_root=plot_save_dir,
+            make_plot=plot_recovery,
+            file_tag=(
+                f"MCF_ARC_run{run_index:03d}_"
+                f"failC{failed_c}"
+            ),
+        )
+
+        failure_records[failed_c] = record
+
+    resilience_meta = {
+        "failure_scenarios": failure_records,
+    }
     return (
         final_assign,
         final_loads,
@@ -1226,5 +1234,6 @@ def run_migration_optimizer_integrated_mcf_arc(
         mip_gap,
         mig_cost,
         paths_new,
-        status_msg
+        status_msg,
+        
     )

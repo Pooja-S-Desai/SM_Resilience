@@ -5,7 +5,7 @@ import time
 import json
 from collections import defaultdict
 from typing import Dict, List, Optional
-
+from failure_scenario_handler import process_failure_scenario
 import networkx as nx
 import gurobipy as gp
 from gurobipy import GRB
@@ -86,11 +86,17 @@ def run_baseline1_FTFSM(
     loads = {int(s): float(v) for s, v in dict(loads).items()}
     capacities = {int(c): float(v) for c, v in dict(capacities).items()}
 
+
     if omega is None:
         omega = list(controllers)
     else:
         omega = list(map(int, omega))
 
+    normal_mode = (len(omega) == 0)
+    if normal_mode:
+        omega = [-1]   # dummy no-failure scenario
+    else:
+            omega = omega
     # ============================================================
     # MULTI-SCENARIO WRAPPER
     # Solve one failed-controller scenario at a time.
@@ -198,11 +204,21 @@ def run_baseline1_FTFSM(
                 if res.get("status") != "SUCCESS":
                     continue
 
+                normal_final_assign = dict(init_assign)
+
                 recovery_assign = {
                     int(s): int(c)
-                    for s, c in res.get("final_assign", {}).items()
+                    for s, c in normal_final_assign.items()
                 }
 
+                recovery_plan = (res.get("meta", {}) or {}).get("recovery_assignments", {})
+                recovery_plan_failed = recovery_plan.get(failed_c, recovery_plan.get(str(failed_c), {}))
+
+                if recovery_plan_failed:
+                    recovery_assign = {
+                        int(s): int(c)
+                        for s, c in recovery_plan_failed.items()
+                    }
                 if not recovery_assign:
                     continue
 
@@ -216,7 +232,13 @@ def run_baseline1_FTFSM(
                     c for c in controllers
                     if int(c) != failed_c
                 ]
+                final_assign = normal_final_assign
 
+                final_loads_map = _loads_by_controller(
+                    final_assign,
+                    loads,
+                    controllers=controllers
+                )
                 plot_final_vs_recovery_assignment(
                     G=G,
                     pos=plot_pos,
@@ -224,13 +246,13 @@ def run_baseline1_FTFSM(
                     controllers=plot_controllers,
 
                     # left: current normal state
-                    final_assign=init_assign,
+                    final_assign=final_assign,
 
                     # right: FT-FSM failure-specific reassignment
                     recovery_assign=recovery_assign,
 
                     loads=loads,
-                    final_loads=init_loads_map,
+                    final_loads=final_loads_map,
                     recovery_loads=recovery_loads,
 
                     topology_name=topology_name or "topology",
@@ -286,7 +308,7 @@ def run_baseline1_FTFSM(
     }
 
     m_active = {
-        (j, w): 0 if j == w else 1
+        (j, w): 1 if normal_mode else (0 if j == w else 1)
         for j in controllers
         for w in omega
     }
@@ -298,6 +320,11 @@ def run_baseline1_FTFSM(
     # -----------------------------
     x = model.addVars(switches, controllers, vtype=GRB.BINARY, name="x")
 
+    for i in switches:
+        model.addConstr(
+            gp.quicksum(x[i, j] for j in controllers) == 1,
+            name=f"x_assign_once_{i}"
+        )
     b = model.addVars(
         switches,
         controllers,
@@ -525,7 +552,7 @@ def run_baseline1_FTFSM(
                     == b[i, j] - g[i, j, w],
                     name=f"eq6e_recovery_flow_{i}_{j}_{w}"
                 )
-
+    model.addConstr(eta <= 1.0, name="hard_capacity_feasibility")
     # -----------------------------
     # Eq. (5a)-(5c): q linearization
     # -----------------------------
@@ -579,9 +606,11 @@ def run_baseline1_FTFSM(
             if model.Status in (GRB.INFEASIBLE, GRB.INF_OR_UNBD):
                 os.makedirs("./iis_logs/ftfsm", exist_ok=True)
                 model.computeIIS()
+                scenario_name = "normal" if normal_mode else f"failC{omega[0]}"
+
                 model.write(
                     f"./iis_logs/ftfsm/"
-                    f"{topology_name or 'topology'}_run{run_index:03d}_failC{omega[0]}_ftfsm.ilp"
+                    f"{topology_name or 'topology'}_run{run_index:03d}_{scenario_name}_ftfsm.ilp"
                 )
         except Exception:
             pass
@@ -625,6 +654,51 @@ def run_baseline1_FTFSM(
         1 for i in switches
         if int(init_assign.get(i)) != int(final_assign.get(i))
     )
+    failed_c = int(omega[0])
+
+    migrated_switches = {
+        int(i): {
+            "from": int(init_assign[i]),
+            "to": int(final_assign[i]),
+            "load": float(loads[i]),
+            "is_orphan": int(init_assign[i]) == failed_c,
+        }
+        for i in switches
+        if int(init_assign[i]) != int(final_assign[i])
+    }
+
+
+    mig_count = len(migrated_switches)
+
+    orphan_migration_count = sum(
+        1
+        for info in migrated_switches.values()
+        if info["is_orphan"]
+    )
+
+    non_orphan_migration_count = sum(
+        1
+        for info in migrated_switches.values()
+        if not info["is_orphan"]
+    )
+
+    total_migrated_load = sum(
+        float(info["load"])
+        for info in migrated_switches.values()
+    )
+
+    orphan_migrated_load = sum(
+        float(info["load"])
+        for info in migrated_switches.values()
+        if info["is_orphan"]
+    )
+
+    non_orphan_migrated_load = sum(
+        float(info["load"])
+        for info in migrated_switches.values()
+        if not info["is_orphan"]
+    )
+    failed_c = int(omega[0])
 
     obj_val = float(model.ObjVal)
     mip_gap = float(model.MIPGap) if model.IsMIP else None
@@ -639,60 +713,68 @@ def run_baseline1_FTFSM(
         for i in switches
     }
 
-    f_values = {}
-    for i in switches:
-        f_values[int(i)] = {}
-        for j in controllers:
-            for jp in controllers:
-                if jp == j:
-                    continue
-                for w in omega:
-                    key = (i, j, jp, w)
+    if normal_mode:
+        f_values = {}
+    else:
+        f_values = {}
+        for i in switches:
+            f_values[int(i)] = {}
+            for j in controllers:
+                for jp in controllers:
+                    if jp == j:
+                        continue
+                    for w in omega:
+                        key = (i, j, jp, w)
+                        if key in f and f[key].X > 1e-6:
+                            f_values[int(i)][f"{j}->{jp}|fail{w}"] = float(f[key].X)
+
+    if normal_mode:
+        recovery_plan = {}
+        recovery_assignments = {}
+        recovery_loads_by_failure = {}
+    else:
+            # existing recovery loop here
+        recovery_plan = {}
+        recovery_assignments = {}
+        recovery_loads_by_failure = {}
+
+        for failed_c in omega:
+            failed_c = int(failed_c)
+
+            recovery_plan[failed_c] = {}
+            recovery_assign = dict(final_assign)
+
+            orphan_switches = [
+                i for i in switches
+                if init_assign.get(i) == failed_c
+            ]
+            for i in orphan_switches:
+                src = failed_c
+                targets = {}
+
+                for jp in controllers:
+                    if jp == src:
+                        continue
+
+                    key = (i, src, jp, failed_c)
                     if key in f and f[key].X > 1e-6:
-                        f_values[int(i)][f"{j}->{jp}|fail{w}"] = float(f[key].X)
+                        targets[int(jp)] = float(f[key].X)
 
-    recovery_plan = {}
-    recovery_assignments = {}
-    recovery_loads_by_failure = {}
+                recovery_plan[failed_c][int(i)] = targets
 
-    for failed_c in omega:
-        failed_c = int(failed_c)
+                if targets:
+                    chosen_backup = max(targets, key=targets.get)
+                    recovery_assign[int(i)] = int(chosen_backup)
 
-        recovery_plan[failed_c] = {}
-        recovery_assign = dict(final_assign)
+            recovery_assignments[failed_c] = recovery_assign
 
-        orphan_switches = [
-            i for i in switches
-            if final_assign.get(i) == failed_c
-        ]
-
-        for i in orphan_switches:
-            src = failed_c
-            targets = {}
-
-            for jp in controllers:
-                if jp == src:
+            rec_loads = defaultdict(float)
+            for i, c in recovery_assign.items():
+                if int(c) == failed_c:
                     continue
+                rec_loads[int(c)] += float(loads.get(int(i), 0.0))
 
-                key = (i, src, jp, failed_c)
-                if key in f and f[key].X > 1e-6:
-                    targets[int(jp)] = float(f[key].X)
-
-            recovery_plan[failed_c][int(i)] = targets
-
-            if targets:
-                chosen_backup = max(targets, key=targets.get)
-                recovery_assign[int(i)] = int(chosen_backup)
-
-        recovery_assignments[failed_c] = recovery_assign
-
-        rec_loads = defaultdict(float)
-        for i, c in recovery_assign.items():
-            if int(c) == failed_c:
-                continue
-            rec_loads[int(c)] += float(loads.get(int(i), 0.0))
-
-        recovery_loads_by_failure[failed_c] = dict(rec_loads)
+            recovery_loads_by_failure[failed_c] = dict(rec_loads)
 
     # ------------------------------------------------------------
     # Write per-scenario plan JSON
@@ -702,10 +784,13 @@ def run_baseline1_FTFSM(
         os.makedirs(ftfsm_dir, exist_ok=True)
 
         tag = f"_{plot_file_tag}" if plot_file_tag else ""
-        plan_file = os.path.join(
-            ftfsm_dir,
-            f"{topology_name or 'topology'}{tag}_run{run_index:03d}_ftfsm_recovery_plan.json"
-        )
+        if normal_mode:
+            fname = f"{topology_name or 'topology'}{tag}_run{run_index:03d}_ftfsm_normal_assignment.json"
+        else:
+            fname = f"{topology_name or 'topology'}{tag}_run{run_index:03d}_ftfsm_recovery_plan.json"
+
+        plan_file = os.path.join(ftfsm_dir, fname)
+
 
         with open(plan_file, "w") as fh:
             json.dump(
@@ -715,7 +800,7 @@ def run_baseline1_FTFSM(
                         "run_index": int(run_index),
                         "status": status,
                         "eta": float(eta.X),
-                        "failed_controller": int(omega[0]),
+                        "failed_controller": None if normal_mode else int(omega[0]),
                         "final_assign": final_assign,
                         "final_loads": final_loads,
                         "b_fractional_assignment": b_values,
@@ -723,6 +808,13 @@ def run_baseline1_FTFSM(
                         "recovery_plan_fractional": recovery_plan,
                         "recovery_assignments_largest_fraction": recovery_assignments,
                         "recovery_loads_by_failure": recovery_loads_by_failure,
+                        "network_wide_migrated_switches": migrated_switches,
+                        "total_network_migrations": int(mig_count),
+                        "orphan_migration_count": int(orphan_migration_count),
+                        "non_orphan_migration_count": int(non_orphan_migration_count),
+                        "total_migrated_load": float(total_migrated_load),
+                        "orphan_migrated_load": float(orphan_migrated_load),
+                        "non_orphan_migrated_load": float(non_orphan_migrated_load),
                     }
                 ),
                 fh,
@@ -736,7 +828,18 @@ def run_baseline1_FTFSM(
         "solve_time_sec": solve_time,
         "eta": float(eta.X),
         "mip_gap": mip_gap,
+
         "num_migrations": int(mig_count),
+        "total_network_migrations": int(mig_count),
+        "orphan_migration_count": int(orphan_migration_count),
+        "non_orphan_migration_count": int(non_orphan_migration_count),
+
+        "total_migrated_load": float(total_migrated_load),
+        "orphan_migrated_load": float(orphan_migrated_load),
+        "non_orphan_migrated_load": float(non_orphan_migrated_load),
+
+        "migrated_switches": migrated_switches,
+
         "recovery_plan": recovery_plan,
         "recovery_assignments": recovery_assignments,
         "recovery_loads_by_failure": recovery_loads_by_failure,
