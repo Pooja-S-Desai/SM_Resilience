@@ -417,6 +417,11 @@ def plot_final_vs_recovery_assignment(
     backup_capacity=None,
     backup_pos=None,
     file_tag=None,
+    fractional_recovery=None,
+    residual_by_switch=None,
+    migration_count=None,
+    capacity_threshold=delta,
+    integer_load_labels=False,
 ):
     os.makedirs(save_dir, exist_ok=True)
 
@@ -486,6 +491,8 @@ def plot_final_vs_recovery_assignment(
         and backup_controller is not None
         and recovery_assign.get(s) == backup_controller
     }
+    fractional_recovery = fractional_recovery or {}
+    residual_by_switch = residual_by_switch or {}
 
     def draw_failed_controller_box(ax, square_side):
         if failed_controller not in pos2:
@@ -537,6 +544,40 @@ def plot_final_vs_recovery_assignment(
                         linewidth=1.4,
                         color=controller_colors[backup_controller],
                         zorder=1
+                    )
+
+        if is_recovery and fractional_recovery:
+            # FT-FSM-only overlay: retain the exact standard plot styling and
+            # add dotted associations labelled with their traffic fractions.
+            for switch, targets in fractional_recovery.items():
+                if switch not in pos2:
+                    continue
+                sx, sy = pos2[switch]
+                for target, fraction in targets.items():
+                    target = int(target)
+                    fraction = float(fraction)
+                    if fraction <= 1e-9 or target not in pos2:
+                        continue
+                    tx, ty = pos2[target]
+                    ax.plot(
+                        [sx, tx], [sy, ty],
+                        linestyle=":",
+                        linewidth=1.6,
+                        color=controller_colors.get(target, "gray"),
+                        alpha=0.9,
+                        zorder=2,
+                    )
+                    ax.text(
+                        sx + 0.55 * (tx - sx),
+                        sy + 0.55 * (ty - sy),
+                        f"{fraction:.2g}",
+                        fontsize=9,
+                        fontweight="bold",
+                        color=controller_colors.get(target, "black"),
+                        bbox=dict(facecolor="white", edgecolor="none", alpha=0.8, pad=1.0),
+                        ha="center",
+                        va="center",
+                        zorder=7,
                     )
 
         for n in switches:
@@ -614,9 +655,10 @@ def plot_final_vs_recovery_assignment(
                 va="bottom"
             )
 
-            load_val = round(loads_map.get(c, 0), 1)
+            raw_load_val = float(loads_map.get(c, 0))
+            load_val = math.ceil(raw_load_val) if integer_load_labels else round(raw_load_val, 1)
             cap_c = controller_capacity.get(c, 0) if isinstance(controller_capacity, dict) else controller_capacity
-            threshold = delta * cap_c
+            threshold = float(capacity_threshold) * cap_c
             txt_color = "red" if load_val > threshold else "green"
 
             load_label = ax.text(
@@ -647,6 +689,17 @@ def plot_final_vs_recovery_assignment(
 
     load_dev_final = compute_load_deviation(final_assign, loads)
     load_dev_recovery = compute_load_deviation(recovery_assign, loads)
+    if fractional_recovery:
+        # Dominant assignments are only a drawing aid. The title must report
+        # the actual fraction-weighted recovery loads.
+        recovery_values = [float(v) for v in recovery_loads.values()]
+        load_dev_recovery = (
+            max(recovery_values) - min(recovery_values)
+            if recovery_values else 0.0
+        )
+        if integer_load_labels:
+            load_dev_final = math.ceil(float(load_dev_final))
+            load_dev_recovery = math.ceil(float(load_dev_recovery))
 
     draw_one(ax1, final_assign, final_loads, original_controllers, is_recovery=False)
     draw_one(ax2, recovery_assign, recovery_loads, active_recovery_controllers, is_recovery=True)
@@ -664,6 +717,10 @@ def plot_final_vs_recovery_assignment(
         Line2D([], [], linestyle="none",
                label=f"Load deviation — final: {load_dev_final} | recovery: {load_dev_recovery}")
     ]
+    if migration_count is not None:
+        summary_handles.append(
+            Line2D([], [], linestyle="none", label=f"Migrations: {int(migration_count)}")
+        )
 
     icon_handles = [
         Line2D([0], [0], marker="s", linestyle="", color="w",
@@ -685,6 +742,12 @@ def plot_final_vs_recovery_assignment(
                    label=f"Planned links to C{backup_controller}")
         )
 
+    if fractional_recovery:
+        icon_handles.append(
+            Line2D([0], [0], linestyle=":", color="black", linewidth=1.6,
+                   label="Fractional traffic association (line label = fraction)")
+        )
+
     controller_handles = []
     seen_legend_ctrls = set()
 
@@ -694,7 +757,8 @@ def plot_final_vs_recovery_assignment(
         seen_legend_ctrls.add(c)
 
         cap_c = controller_capacity.get(c, 0) if isinstance(controller_capacity, dict) else controller_capacity
-        usable = round(delta * cap_c, 1)
+        usable_value = float(capacity_threshold) * cap_c
+        usable = math.ceil(usable_value) if integer_load_labels else round(usable_value, 1)
 
         suffix = " New Backup" if c == backup_controller else ""
 
@@ -718,9 +782,13 @@ def plot_final_vs_recovery_assignment(
     )
 
     tag = f"_{file_tag}" if file_tag else ""
+    backup_tag = (
+        f"_backupC{backup_controller}"
+        if backup_controller is not None else ""
+    )
     base_path = os.path.join(
         save_dir,
-        f"{topology_name}{tag}_failC{failed_controller}_backupC{backup_controller}"
+        f"{topology_name}{tag}_failC{failed_controller}{backup_tag}"
     )
 
     save_poster_figures(fig, base_path)
@@ -812,7 +880,7 @@ def _draw_fractional_switch_node(
     )
 
 
-def plot_final_vs_fractional_recovery_assignment(
+def _plot_fractional_pie_legacy(
     *,
     G,
     pos,
@@ -941,6 +1009,24 @@ def plot_final_vs_fractional_recovery_assignment(
                 residual_fraction=residual_fraction,
             )
 
+            # Explicitly show every split traffic destination. Line width and
+            # opacity encode the assigned fraction while color identifies the
+            # destination controller, matching the node pie segments.
+            for target_controller, fraction in targets.items():
+                target_controller = int(target_controller)
+                fraction = float(fraction)
+                if fraction <= 1e-9 or target_controller not in pos:
+                    continue
+                ax_right.plot(
+                    [pos[switch][0], pos[target_controller][0]],
+                    [pos[switch][1], pos[target_controller][1]],
+                    linestyle="--",
+                    linewidth=0.8 + 3.2 * fraction,
+                    alpha=0.35 + 0.60 * min(1.0, fraction),
+                    color=controller_color_map.get(target_controller, "gray"),
+                    zorder=4,
+                )
+
         elif original_controller != int(failed_controller):
             nx.draw_networkx_nodes(
                 G,
@@ -1032,16 +1118,57 @@ def plot_final_vs_fractional_recovery_assignment(
         f"fractional_failC{failed_controller}"
     )
 
-    output_file = os.path.join(
-        save_dir,
-        f"{tag}.png",
-    )
-
-    fig.savefig(
-        output_file,
-        dpi=300,
-        bbox_inches="tight",
-    )
+    output_base = os.path.join(save_dir, tag)
+    save_poster_figures(fig, output_base)
     plt.close(fig)
 
-    return output_file
+    return output_base
+
+
+# Keep FT-FSM visually identical to the integral recovery plots.  Its only
+# additional visual encoding is the labelled dotted association overlay.
+def plot_fractional_traffic_recovery_comparison(
+    *, G, pos, switches, controllers, final_assign, fractional_recovery,
+    residual_by_switch, loads, final_loads, recovery_loads, topology_name,
+    save_dir, controller_capacity, failed_controller, backup_controller=None,
+    backup_capacity=None, file_tag=None, migration_count=None,
+    capacity_threshold=delta,
+):
+    dominant_recovery = dict(final_assign)
+    for switch, targets in fractional_recovery.items():
+        valid = {
+            int(controller): float(fraction)
+            for controller, fraction in targets.items()
+            if float(fraction) > 1e-9
+        }
+        if valid:
+            dominant_recovery[int(switch)] = max(valid, key=valid.get)
+
+    integral_tag = (file_tag or "FTFSM").rsplit("_failC", 1)[0]
+    result = plot_final_vs_recovery_assignment(
+        G=G,
+        pos=pos,
+        switches=switches,
+        controllers=controllers,
+        final_assign=final_assign,
+        recovery_assign=dominant_recovery,
+        loads=loads,
+        final_loads=final_loads,
+        recovery_loads=recovery_loads,
+        topology_name=topology_name,
+        save_dir=save_dir,
+        controller_capacity=controller_capacity,
+        failed_controller=failed_controller,
+        backup_controller=backup_controller,
+        backup_capacity=backup_capacity,
+        file_tag=integral_tag,
+        fractional_recovery=fractional_recovery,
+        residual_by_switch=residual_by_switch,
+        migration_count=migration_count,
+        capacity_threshold=capacity_threshold,
+        integer_load_labels=True,
+    )
+    return result
+
+
+plot_final_vs_fractional_recovery_assignment = plot_fractional_traffic_recovery_comparison

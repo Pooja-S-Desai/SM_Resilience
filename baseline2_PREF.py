@@ -8,7 +8,8 @@ import random
 from typing import Any, Dict, List
 
 import networkx as nx
-import matplotlib.pyplot as plt
+
+from failure_scenario_handler import process_failure_scenario
 
 
 # ============================================================
@@ -679,8 +680,8 @@ def run_baseline_pref_cp_ga_exact(
     dij=None,
     paths_sc=None,
     msg_bits=None,
-    usable_threshold=1.0,
-    overload_threshold=0.8,
+    usable_threshold=0.90,
+    overload_threshold=0.90,
     alpha=0.5,
     gamma=0.8,
     population_size=50,
@@ -693,6 +694,16 @@ def run_baseline_pref_cp_ga_exact(
     output_dir=None,
     seed=42,
     verbose=False,
+    topology_name=None,
+    run_index=0,
+    plot_recovery=True,
+    plot_pos=None,
+    master_seed=None,
+    switch_seed=None,
+    run_number=None,
+    pre_failure_response_time_ms=None,
+    sync_delay_ms=0.0,
+    comparison_csv_file=None,
 ):
     solve_start = time.perf_counter()
 
@@ -724,30 +735,60 @@ def run_baseline_pref_cp_ga_exact(
         verbose=verbose,
     )
 
+    solve_time = time.perf_counter() - solve_start
+
+    scenario_records = {}
     if output_dir is not None:
         os.makedirs(output_dir, exist_ok=True)
+        # The common recovery CSV/JSON below supersedes the old PREF-only
+        # summary files, which had a different schema and duplicated records.
+        json_log, csv_log = None, None
 
-        json_log, csv_log = save_pref_cp_logs(
-            results=results,
-            output_dir=output_dir,
-        )
-
-        plot_paths = plot_pref_cp_all_failures(
-            G=G,
-            switches=switches,
-            controllers=controllers,
-            loads=loads,
-            final_assign=final_assign,
-            results=results,
-            output_dir=output_dir,
-            seed=seed,
-        )
+        # Use the exact same common plotting routine and recovery CSV writer as MCF-ARC.
+        # The old PREF-only spring-layout plot is intentionally not called.
+        common_root = output_dir
+        for failed_c, result in results.items():
+            scenario_records[int(failed_c)] = process_failure_scenario(
+                algorithm="PREF_CP_GA",
+                topology_name=topology_name or "topology",
+                run_index=int(run_index),
+                failed_controller=int(failed_c),
+                G=G,
+                pos=plot_pos,
+                switches=switches,
+                controllers=controllers,
+                loads=loads,
+                capacities=capacities,
+                usable_threshold=float(overload_threshold),
+                initial_assignment=final_assign,
+                recovery_assignment=result.get("recovery_assign", {}),
+                residual_by_switch={},
+                status=result.get("status", "UNKNOWN"),
+                solve_time_sec=float(solve_time),
+                objective_value=result.get("objective"),
+                mip_gap=None,
+                output_root=common_root,
+                comparison_csv_file=comparison_csv_file,
+                make_plot=bool(plot_recovery),
+                file_tag=f"PREF_run{int(run_index):03d}_failC{int(failed_c)}",
+                master_seed=master_seed,
+                switch_seed=switch_seed if switch_seed is not None else seed,
+                run_number=run_number,
+                reassignment_scope="orphan_only",
+                pre_failure_response_time_ms=pre_failure_response_time_ms,
+                sync_delay_ms=sync_delay_ms,
+                write_csv=True,
+            )
+        plot_paths = {
+            int(fc): rec.get("plot_path")
+            for fc, rec in scenario_records.items()
+            if rec.get("plot_path")
+        }
     else:
         json_log = None
         csv_log = None
         plot_paths = {}
 
-    solve_time = time.perf_counter() - solve_start
 
     obj_values = [
         float(r.get("objective", 0.0))
@@ -804,6 +845,7 @@ def run_baseline_pref_cp_ga_exact(
         "enforce_capacity": enforce_capacity,
         "solve_time_sec": solve_time,
         "all_failure_results": results,
+        "failure_scenarios": scenario_records,
         "plot_paths": plot_paths,
         "json_log": json_log,
         "csv_log": csv_log,

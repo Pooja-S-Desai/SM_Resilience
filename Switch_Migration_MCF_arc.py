@@ -183,6 +183,10 @@ def run_migration_optimizer_integrated_mcf_arc(
     plot_file_tag: str | None = None,
     node_capacities: dict | None = None,
     dij: dict | None = None,
+    master_seed: int | None = None,
+    switch_seed: int | None = None,
+    run_number: int | None = None,
+    comparison_csv_file: str | None = None,
 ):
     """
     Arc-based integrated assignment + MCF + RT variables.
@@ -210,7 +214,8 @@ def run_migration_optimizer_integrated_mcf_arc(
                 {}, {}, None, 0, {}, {}, None,
                 {},
                 {},
-                f"NO_FEASIBLE_ALLOWED_CONTROLLER_MCF_ARC_SWITCH_{s}"
+                f"NO_FEASIBLE_ALLOWED_CONTROLLER_MCF_ARC_SWITCH_{s}",
+                {},
             )
 
     commodity_pairs = [(s, c) for (s, c) in allowed_pairs if s != c]
@@ -691,11 +696,6 @@ def run_migration_optimizer_integrated_mcf_arc(
     # ---------------------------------------------------------
     residual_candidates = [v for v in G.nodes() if v not in controllers]
 
-    old_node_capacity = {
-        v: float(node_capacities.get(v, 0.0))
-        for v in residual_candidates
-    }
-
     rctrl_pairs = [
         (j, v)
         for j in controllers
@@ -722,7 +722,7 @@ def run_migration_optimizer_integrated_mcf_arc(
 
     # Capacity check for every single-controller failure case.
     # For each failed controller j, surviving controller k can receive
-    # some of j's switches only if k remains within usable capacity.
+    # some of j's switches until the common 90% recovery ceiling is reached.
     for j in controllers:
         for k in controllers:
             if k == j:
@@ -736,7 +736,7 @@ def run_migration_optimizer_integrated_mcf_arc(
 
             m.addConstr(
                 load_expr[k] + recovered_load_j_to_k
-                <= float(GLOBAL_THRESHOLD) * float(capacities[k]),
+                <= 0.90 * float(capacities[k]),
                 name=f"backup_cap_fail_{j}_to_{k}"
             )
 
@@ -776,19 +776,9 @@ def run_migration_optimizer_integrated_mcf_arc(
                     name=f"residual_requires_controller_{s}_{j}"
                 )
 
-        # Capacity of selected residual controller
-        # The total residual load must fit inside the capacity of the newly selected controller. 
-        # I still dont kow which controller is backup so keep summation
-        m.addConstr(
-            
-            residual_load[j] <=
-            GLOBAL_THRESHOLD *
-            gp.quicksum(
-                old_node_capacity[v] * rctrl[j, v]
-                for v in residual_candidates
-            ),
-            name=f"residual_capacity_{j}"
-        )
+        # A newly planned controller is sized after solving to 120% of the
+        # residual load. Candidate node capacities do not artificially force a
+        # new controller while surviving controllers still have raw headroom.
     # ============================================================
     # POST-FAILURE LOAD BALANCE OBJECTIVE
     # For each failed controller j, after its orphan switches are
@@ -918,7 +908,9 @@ def run_migration_optimizer_integrated_mcf_arc(
     # POST-SOLVE HANDLING (WITH STATUS PROPAGATION)
     # ============================================================
 
+    _solve_t0 = time.perf_counter()
     m.optimize()
+    model_solve_time_sec = time.perf_counter() - _solve_t0
 
     # -----------------------------
     # IIS dump for infeasible
@@ -951,7 +943,8 @@ def run_migration_optimizer_integrated_mcf_arc(
                 "total": 0.0,
             },
             {},
-            status_msg
+            status_msg,
+            {},
         )
 
     # -----------------------------
@@ -962,7 +955,8 @@ def run_migration_optimizer_integrated_mcf_arc(
             {}, {}, None, 0, {}, {}, None,
             {},
             {},
-            "INF_OR_UNBOUNDED_MCF_ARC"
+            "INF_OR_UNBOUNDED_MCF_ARC",
+            {},
         )
 
     # -----------------------------
@@ -973,7 +967,8 @@ def run_migration_optimizer_integrated_mcf_arc(
             {}, {}, None, 0, {}, {}, None,
             {},
             {},
-            "TIME_LIMIT_NO_SOLUTION_MCF_ARC"
+            "TIME_LIMIT_NO_SOLUTION_MCF_ARC",
+            {},
         )
 
     # -----------------------------
@@ -984,7 +979,8 @@ def run_migration_optimizer_integrated_mcf_arc(
             {}, {}, None, 0, {}, {}, None,
             {},
             {},
-            f"NO_FEASIBLE_SOLUTION_STATUS_{m.Status}"
+            f"NO_FEASIBLE_SOLUTION_STATUS_{m.Status}",
+            {},
         )
 
     # ============================================================
@@ -1013,7 +1009,8 @@ def run_migration_optimizer_integrated_mcf_arc(
             {}, {}, None, 0, {}, {}, None,
             {},
             {},
-            f"NO_FEASIBLE_COMPLETE_ASSIGNMENT_MCF_ARC_MISSING_{len(missing_assign)}"
+            f"NO_FEASIBLE_COMPLETE_ASSIGNMENT_MCF_ARC_MISSING_{len(missing_assign)}",
+            {},
         )
 
     # ----------------------------
@@ -1161,24 +1158,27 @@ def run_migration_optimizer_integrated_mcf_arc(
             ):
                 residual_load_value = float(loads[switch])
 
-                residual_by_switch[switch] = {
-                    "residual_fraction": 1.0,
-                    "residual_load": residual_load_value,
-                }
-
                 if residual_controller is not None:
                     recovery_assignment[switch] = int(
                         residual_controller
                     )
+                else:
+                    # Residual means genuinely unaccommodated load.  A switch
+                    # assigned to an activated backup is accommodated and must
+                    # not also be counted as residual.
+                    residual_by_switch[switch] = {
+                        "residual_fraction": 1.0,
+                        "residual_load": residual_load_value,
+                    }
 
         selected_backup_capacity = None
 
         if residual_controller is not None:
-            selected_backup_capacity = float(
-                node_capacities.get(
-                    residual_controller,
-                    0.0,
-                )
+            selected_backup_capacity = 1.20 * sum(
+                float(loads[s])
+                for s in orphan_switches
+                if (s, failed_c) in residual
+                and residual[s, failed_c].X > 0.5
             )
 
         record = process_failure_scenario(
@@ -1193,7 +1193,7 @@ def run_migration_optimizer_integrated_mcf_arc(
             controllers=controllers,
             loads=loads,
             capacities=capacities,
-            usable_threshold=GLOBAL_THRESHOLD,
+            usable_threshold=0.90,
 
             # The normal state after load balancing
             initial_assignment=final_assign,
@@ -1204,7 +1204,7 @@ def run_migration_optimizer_integrated_mcf_arc(
             residual_by_switch=residual_by_switch,
 
             status=status_msg,
-            solve_time_sec=0.0,
+            solve_time_sec=model_solve_time_sec,
             objective_value=obj_val,
             mip_gap=mip_gap,
 
@@ -1212,11 +1212,17 @@ def run_migration_optimizer_integrated_mcf_arc(
             backup_capacity=selected_backup_capacity,
 
             output_root=plot_save_dir,
+            comparison_csv_file=comparison_csv_file,
             make_plot=plot_recovery,
             file_tag=(
                 f"MCF_ARC_run{run_index:03d}_"
                 f"failC{failed_c}"
             ),
+            switch_seed=switch_seed,
+            master_seed=master_seed,
+            run_number=run_number,
+            reassignment_scope="orphan_only",
+            sync_delay_ms=sync_per_ctrl_ms,
         )
 
         failure_records[failed_c] = record
@@ -1235,5 +1241,5 @@ def run_migration_optimizer_integrated_mcf_arc(
         mig_cost,
         paths_new,
         status_msg,
-        
+        resilience_meta,
     )

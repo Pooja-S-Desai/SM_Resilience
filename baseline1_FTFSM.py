@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import os
@@ -66,7 +67,7 @@ def run_baseline1_FTFSM(
     dij: Optional[dict] = None,
     Dcc: Optional[dict] = None,
     *,
-    usable_threshold: float = 0.8,
+    usable_threshold: float = 0.90,
     rule_install_cost: float = 0.0,
     epsilon: float = 1.0,
     omega: Optional[List[int]] = None,
@@ -79,6 +80,10 @@ def run_baseline1_FTFSM(
     plot_pos: dict | None = None,
     plot_save_dir: str | None = None,
     plot_file_tag: str | None = None,
+    master_seed: int | None = None,
+    switch_seed: int | None = None,
+    run_number: int | None = None,
+    comparison_csv_file: str | None = None,
 ):
     switches = list(map(int, switches))
     controllers = list(map(int, controllers))
@@ -137,10 +142,15 @@ def run_baseline1_FTFSM(
                 cost_mode=cost_mode,
                 topology_name=topology_name,
                 run_index=run_index,
-                plot_recovery=False,     # IMPORTANT: plotting only in wrapper
+                # Each single-failure solve uses the common fractional plotter.
+                plot_recovery=plot_recovery,
                 plot_pos=plot_pos,
                 plot_save_dir=plot_save_dir,
                 plot_file_tag=plot_file_tag,
+                master_seed=master_seed,
+                switch_seed=switch_seed,
+                run_number=run_number,
+                comparison_csv_file=comparison_csv_file,
             )
 
             total_solve_time += float((meta_tmp or {}).get("solve_time_sec", 0.0))
@@ -154,7 +164,10 @@ def run_baseline1_FTFSM(
                 "mip_gap": mip_tmp,
             }
 
-            if first_success is None and status_tmp == "SUCCESS":
+            if first_success is None and (
+                status_tmp == "SUCCESS"
+                or str(status_tmp).startswith("FEASIBLE_STATUS")
+            ):
                 first_success = (
                     fa_tmp,
                     paths_tmp,
@@ -183,89 +196,9 @@ def run_baseline1_FTFSM(
 
             print(f"[FTFSM ALL SCENARIOS] written → {out_file}")
 
-        # ------------------------------------------------------------
-        # Generate one plot per failed controller once
-        # ------------------------------------------------------------
-        if plot_recovery and plot_pos is not None and plot_save_dir is not None:
-
-            plot_dir = os.path.join(plot_save_dir, "FTFSM_failure_plots")
-            os.makedirs(plot_dir, exist_ok=True)
-
-            init_loads_map = _loads_by_controller(
-                init_assign,
-                loads,
-                controllers=controllers
-            )
-
-            for failed_c, res in all_results.items():
-
-                failed_c = int(failed_c)
-
-                if res.get("status") != "SUCCESS":
-                    continue
-
-                normal_final_assign = dict(init_assign)
-
-                recovery_assign = {
-                    int(s): int(c)
-                    for s, c in normal_final_assign.items()
-                }
-
-                recovery_plan = (res.get("meta", {}) or {}).get("recovery_assignments", {})
-                recovery_plan_failed = recovery_plan.get(failed_c, recovery_plan.get(str(failed_c), {}))
-
-                if recovery_plan_failed:
-                    recovery_assign = {
-                        int(s): int(c)
-                        for s, c in recovery_plan_failed.items()
-                    }
-                if not recovery_assign:
-                    continue
-
-                recovery_loads = _loads_by_controller(
-                    recovery_assign,
-                    loads,
-                    controllers=[c for c in controllers if c != failed_c]
-                )
-
-                plot_controllers = [
-                    c for c in controllers
-                    if int(c) != failed_c
-                ]
-                final_assign = normal_final_assign
-
-                final_loads_map = _loads_by_controller(
-                    final_assign,
-                    loads,
-                    controllers=controllers
-                )
-                plot_final_vs_recovery_assignment(
-                    G=G,
-                    pos=plot_pos,
-                    switches=switches,
-                    controllers=plot_controllers,
-
-                    # left: current normal state
-                    final_assign=final_assign,
-
-                    # right: FT-FSM failure-specific reassignment
-                    recovery_assign=recovery_assign,
-
-                    loads=loads,
-                    final_loads=final_loads_map,
-                    recovery_loads=recovery_loads,
-
-                    topology_name=topology_name or "topology",
-                    save_dir=plot_dir,
-
-                    controller_capacity=capacities,
-                    failed_controller=failed_c,
-
-                    backup_controller=None,
-                    backup_capacity=None,
-
-                    file_tag=f"FTFSM_run{run_index:03d}_failC{failed_c}"
-                )
+        # Per-controller plots are produced by process_failure_scenario using
+        # the fractional traffic representation. No dominant-controller plot
+        # is generated here because it would hide traffic splitting.
 
         if first_success is not None:
             fa_ret, paths_ret, fl_ret, meta_ret, obj_ret, mip_ret, status_ret = first_success
@@ -320,11 +253,6 @@ def run_baseline1_FTFSM(
     # -----------------------------
     x = model.addVars(switches, controllers, vtype=GRB.BINARY, name="x")
 
-    for i in switches:
-        model.addConstr(
-            gp.quicksum(x[i, j] for j in controllers) == 1,
-            name=f"x_assign_once_{i}"
-        )
     b = model.addVars(
         switches,
         controllers,
@@ -412,9 +340,26 @@ def run_baseline1_FTFSM(
                 name=f"eq3d_b_le_x_{i}_{j}"
             )
 
+    # In the requested single-failure plan, switches whose original
+    # controller survives remain unchanged. Only traffic belonging to the
+    # failed controller is fractionally redistributed among survivors. This
+    # matches the paper's failure examples and makes recovery comparable with
+    # the orphan-only MCF-ARC/PREF/FLCF plans.
+    if not normal_mode:
+        failed_controller = int(omega[0])
+        for i in switches:
+            original_controller = int(init_assign[i])
+            if original_controller == failed_controller:
+                continue
+            for j in controllers:
+                model.addConstr(
+                    b[i, j] == (1.0 if j == original_controller else 0.0),
+                    name=f"survivor_fixed_{i}_{j}_fail{failed_controller}",
+                )
+
     # -----------------------------
-    # Eq. (3e): f_i^{j,j'}(w) <= m_j^w
-    # Paper-exact direction.
+    # Eq. (3e): f_i^{j,j'}(w) <= m_{j'}^w.  The destination
+    # controller must be active; the source may be the failed controller.
     # -----------------------------
     for i in switches:
         for j in controllers:
@@ -423,7 +368,7 @@ def run_baseline1_FTFSM(
                     continue
                 for w in omega:
                     model.addConstr(
-                        f[i, j, jp, w] <= m_active[j, w],
+                        f[i, j, jp, w] <= m_active[jp, w],
                         name=f"eq3e_f_active_{i}_{j}_{jp}_{w}"
                     )
 
@@ -469,41 +414,25 @@ def run_baseline1_FTFSM(
                 )
 
     # -----------------------------
-    # Eq. (6c): load definition
+    # Post-failure controller load.
+    #
+    # b_i^j is explicitly defined by the paper as the fraction of switch i's
+    # traffic distributed to controller j.  Computing L from binary x (as the
+    # previous implementation did) charges the full switch load to every
+    # controller in the support and makes fractional solutions unattractive.
+    # The load must therefore be the fraction-weighted traffic, including the
+    # configured rule-installation overhead.
     # -----------------------------
     for j in controllers:
         for w in omega:
 
-            packet_in_load = gp.quicksum(
-                p[i, j] * x[i, j]
-                for i in switches
-            )
-
-            rule_install_load = float(rule_install_cost) * gp.quicksum(
-                p[i, jp] * x[i, jp]
-                for i in switches
-                for jp in controllers
-            )
-
-            migrated_load = gp.quicksum(
-                p[i, j] * (
-                    gp.quicksum(
-                        z[i, jp, j, w]
-                        for jp in controllers
-                        if jp != j
-                    )
-                    -
-                    gp.quicksum(
-                        z[i, j, jp, w]
-                        for jp in controllers
-                        if jp != j
-                    )
-                )
-                for i in switches
-            )
-
             model.addConstr(
-                L[j, w] == packet_in_load + rule_install_load + migrated_load,
+                L[j, w] == gp.quicksum(
+                    (1.0 + float(rule_install_cost))
+                    * float(p[i, j])
+                    * b[i, j]
+                    for i in switches
+                ),
                 name=f"eq6c_L_{j}_{w}"
             )
 
@@ -552,7 +481,6 @@ def run_baseline1_FTFSM(
                     == b[i, j] - g[i, j, w],
                     name=f"eq6e_recovery_flow_{i}_{j}_{w}"
                 )
-    model.addConstr(eta <= 1.0, name="hard_capacity_feasibility")
     # -----------------------------
     # Eq. (5a)-(5c): q linearization
     # -----------------------------
@@ -633,10 +561,12 @@ def run_baseline1_FTFSM(
     # ============================================================
     status = "SUCCESS" if model.Status == GRB.OPTIMAL else f"FEASIBLE_STATUS_{model.Status}"
 
-    final_assign = {}
-    for i in switches:
-        best_j = max(controllers, key=lambda j: x[i, j].X)
-        final_assign[int(i)] = int(best_j)
+    # b_i^j is the paper's actual traffic distribution.  Use its largest
+    # fraction only where an integral compatibility assignment is required.
+    final_assign = {
+        int(i): int(max(controllers, key=lambda j: b[i, j].X))
+        for i in switches
+    }
 
     final_loads = _loads_by_controller(
         final_assign,
@@ -656,16 +586,25 @@ def run_baseline1_FTFSM(
     )
     failed_c = int(omega[0])
 
-    migrated_switches = {
-        int(i): {
-            "from": int(init_assign[i]),
-            "to": int(final_assign[i]),
-            "load": float(loads[i]),
-            "is_orphan": int(init_assign[i]) == failed_c,
+    migrated_switches = {}
+    for i in switches:
+        original = int(init_assign[i])
+        fractions = {
+            int(j): float(b[i, j].X)
+            for j in controllers
+            if b[i, j].X > 1e-6
         }
-        for i in switches
-        if int(init_assign[i]) != int(final_assign[i])
-    }
+        moved_fraction = max(0.0, 1.0 - fractions.get(original, 0.0))
+        if moved_fraction > 1e-6:
+            migrated_switches[int(i)] = {
+                "from": original,
+                "to_fractional": fractions,
+                "dominant_to": int(final_assign[i]),
+                "load": float(loads[i]),
+                "moved_fraction": moved_fraction,
+                "moved_load": float(loads[i]) * moved_fraction,
+                "is_orphan": original == failed_c,
+            }
 
 
     mig_count = len(migrated_switches)
@@ -683,18 +622,18 @@ def run_baseline1_FTFSM(
     )
 
     total_migrated_load = sum(
-        float(info["load"])
+        float(info["moved_load"])
         for info in migrated_switches.values()
     )
 
     orphan_migrated_load = sum(
-        float(info["load"])
+        float(info["moved_load"])
         for info in migrated_switches.values()
         if info["is_orphan"]
     )
 
     non_orphan_migrated_load = sum(
-        float(info["load"])
+        float(info["moved_load"])
         for info in migrated_switches.values()
         if not info["is_orphan"]
     )
@@ -744,35 +683,30 @@ def run_baseline1_FTFSM(
             recovery_plan[failed_c] = {}
             recovery_assign = dict(final_assign)
 
-            orphan_switches = [
-                i for i in switches
-                if init_assign.get(i) == failed_c
-            ]
-            for i in orphan_switches:
-                src = failed_c
-                targets = {}
-
-                for jp in controllers:
-                    if jp == src:
-                        continue
-
-                    key = (i, src, jp, failed_c)
-                    if key in f and f[key].X > 1e-6:
-                        targets[int(jp)] = float(f[key].X)
-
+            for i in switches:
+                targets = dict(b_values.get(int(i), {}))
+                original = int(init_assign[i])
+                unchanged = (
+                    len(targets) == 1
+                    and original in targets
+                    and abs(float(targets[original]) - 1.0) <= 1e-6
+                )
+                if unchanged:
+                    continue
                 recovery_plan[failed_c][int(i)] = targets
-
                 if targets:
-                    chosen_backup = max(targets, key=targets.get)
-                    recovery_assign[int(i)] = int(chosen_backup)
+                    recovery_assign[int(i)] = int(max(targets, key=targets.get))
 
             recovery_assignments[failed_c] = recovery_assign
 
             rec_loads = defaultdict(float)
-            for i, c in recovery_assign.items():
-                if int(c) == failed_c:
-                    continue
-                rec_loads[int(c)] += float(loads.get(int(i), 0.0))
+            for i in switches:
+                targets = b_values.get(int(i), {})
+                for c, fraction in targets.items():
+                    if int(c) != failed_c:
+                        rec_loads[int(c)] += (
+                            float(loads.get(int(i), 0.0)) * float(fraction)
+                        )
 
             recovery_loads_by_failure[failed_c] = dict(rec_loads)
 
@@ -787,7 +721,10 @@ def run_baseline1_FTFSM(
         if normal_mode:
             fname = f"{topology_name or 'topology'}{tag}_run{run_index:03d}_ftfsm_normal_assignment.json"
         else:
-            fname = f"{topology_name or 'topology'}{tag}_run{run_index:03d}_ftfsm_recovery_plan.json"
+            fname = (
+                f"{topology_name or 'topology'}{tag}_run{run_index:03d}_"
+                f"failC{int(omega[0])}_ftfsm_recovery_plan.json"
+            )
 
         plan_file = os.path.join(ftfsm_dir, fname)
 
@@ -823,6 +760,39 @@ def run_baseline1_FTFSM(
 
         print(f"[FTFSM PLAN] written → {plan_file}")
 
+    scenario_records = {}
+    if not normal_mode and omega and plot_save_dir is not None:
+        failed_c = int(omega[0])
+        frac_plan = recovery_plan.get(failed_c, {})
+        residual_map = {}
+        for sw in [s for s, c in init_assign.items() if int(c) == failed_c]:
+            assigned_fraction = sum(float(v) for v in frac_plan.get(int(sw), {}).values())
+            residual_fraction = max(0.0, 1.0 - assigned_fraction)
+            if residual_fraction > 1e-8:
+                residual_map[int(sw)] = {
+                    "residual_fraction": residual_fraction,
+                    "residual_load": float(loads.get(int(sw), 0.0)) * residual_fraction,
+                }
+        scenario_records[failed_c] = process_failure_scenario(
+            algorithm="FTFSM",
+            topology_name=topology_name or "topology",
+            run_index=run_index,
+            failed_controller=failed_c,
+            G=G, pos=plot_pos, switches=switches, controllers=controllers,
+            loads=loads, capacities=capacities, usable_threshold=usable_threshold,
+            initial_assignment=init_assign,
+            recovery_assignment=recovery_assignments.get(failed_c, {}),
+            fractional_assignment=frac_plan,
+            residual_by_switch=residual_map,
+            status=status, solve_time_sec=solve_time, objective_value=obj_val, mip_gap=mip_gap,
+            output_root=plot_save_dir,
+            comparison_csv_file=comparison_csv_file,
+            make_plot=bool(plot_recovery and plot_pos is not None),
+            file_tag=f"FTFSM_run{run_index:03d}_failC{failed_c}",
+            switch_seed=switch_seed, master_seed=master_seed, run_number=run_number,
+            reassignment_scope="global",
+        )
+
     meta = {
         "status": status,
         "solve_time_sec": solve_time,
@@ -846,6 +816,7 @@ def run_baseline1_FTFSM(
         "b_fractional_assignment": b_values,
         "f_fractional_migration": f_values,
         "paths_pair": paths_pair,
+        "failure_scenarios": scenario_records,
     }
 
     return (

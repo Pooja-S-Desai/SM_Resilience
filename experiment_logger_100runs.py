@@ -177,6 +177,7 @@ def log_run_to_csv(
             "batch_ts": batch_ts,
             "run_index": run_index,
             "topology": topo,
+            "algo": algo,
             "nodes": nodes,
             "num_switches": len(loads_by_switch) if loads_by_switch else 0,
             "num_controllers": len(controller_set) if controller_set else 0,

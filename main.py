@@ -41,6 +41,7 @@ from switch_migration_optimizer_shortest import run_migration_optimizer
 # Baselines / Variants
 from baseline1_FTFSM import run_baseline1_FTFSM
 from baseline2_PREF import run_baseline_pref_cp_ga_exact
+from baseline3_FLCF import run_baseline3_flcf_exact
 # Steiner / Sync
 from steiner_opt import run_steiner_constant_penalty
 
@@ -183,6 +184,7 @@ def _assert_dict(name, obj):
 
 RUN_BASELINE1 = True   # set False to skip
 RUN_BASELINE2 = True
+RUN_BASELINE3 = True
 # =========================================================================================================================================
 # Main Function
 # =========================================================================================================================================
@@ -256,6 +258,9 @@ def main():
         # ----------------------------------------
         RUN_ROOT = os.path.join(EXP_FOLDER, "runs")
         ensure_dir(RUN_ROOT)
+        # One comparable recovery table for every topology, run, model and
+        # failed-controller scenario in this experiment configuration.
+        RECOVERY_COMPARISON_CSV = os.path.join(EXP_FOLDER, "comparison_recovery.csv")
 
         print("\n==============================")
         print(f"K paths      : {k_path_count}")
@@ -277,7 +282,7 @@ def main():
             topo_name = os.path.splitext(os.path.basename(topo_path))[0]
 
             try:
-                
+
                 G, geo_dup = load_topology(topo_path)
 
                 assign_geographical_weights(G)
@@ -794,6 +799,7 @@ def main():
                         mig_cost_arc,                # migration cost breakdown
                         paths_by_switch_final_arc,    # ✅ reconstructed paths for RT
                         status_arc,
+                        resilience_meta_arc,
                         
                     ) = run_migration_optimizer_integrated_mcf_arc(
                         G=G_run,
@@ -836,6 +842,10 @@ def main():
                         plot_file_tag=f"MCF_ARC_run{RUN_INDEX:03d}_topo{idx:02d}",
                         node_capacities=node_capacities,
                         dij=dist_all,
+                        master_seed=args.master_seed,
+                        switch_seed=SEEDS["loads"],
+                        run_number=RUN_INDEX + 1,
+                        comparison_csv_file=RECOVERY_COMPARISON_CSV,
                     )
 
                     solve_time_mcf_arc = time.perf_counter() - solve_start_MCF_arc
@@ -1213,8 +1223,10 @@ def main():
 
 
                         # ---------- STEP 2: recovery planning from normal final ----------
-                        for failed_c in controllers:
-                            fa_b1, paths_b1, fl_b1, meta_b1, obj_val_b1, mip_b1, status_b1 = run_baseline1_FTFSM(
+                        # The wrapper still solves one independent model per
+                        # failed controller, but returns all scenarios together
+                        # and writes every scenario through the common handler.
+                        fa_b1, paths_b1, fl_b1, meta_b1, obj_val_b1, mip_b1, status_b1 = run_baseline1_FTFSM(
                                 G=G_run,
                                 switches=switches,
                                 controllers=controllers,
@@ -1223,7 +1235,9 @@ def main():
                                 capacities=capacities,
                                 dij=dij,
                                 Dcc=Dcc,
-                                omega=[failed_c],
+                                usable_threshold=0.90,
+                                rule_install_cost=0.10,
+                                omega=controllers,
                                 time_limit=300,
                                 verbose=False,
                                 topology_name=topo_name,
@@ -1231,8 +1245,12 @@ def main():
                                 plot_recovery=True,
                                 plot_pos=pos,
                                 plot_save_dir=ALG_DIR("FTFSM"),
-                                plot_file_tag=f"FTFSM_RECOVERY_run{RUN_INDEX:03d}_failC{failed_c}"
-                            )                        
+                                plot_file_tag=f"FTFSM_RECOVERY_run{RUN_INDEX:03d}",
+                                master_seed=args.master_seed,
+                                switch_seed=SEEDS["loads"],
+                                run_number=RUN_INDEX + 1,
+                                comparison_csv_file=RECOVERY_COMPARISON_CSV,
+                            )
                         #                         fa_b1, paths_b1, fl_b1, meta_b1, obj_val_b1, mip_b1, status_b1 = run_baseline1_FTFSM(
                         #     G=G_run,
                         #     switches=switches,
@@ -1262,11 +1280,17 @@ def main():
                         else:
                             
                             # ----- evaluation (IDENTICAL to SP) -----
+                            paths_b1_sc = {
+                                (s, c): paths_b1.get(s, [])
+                                for s, c in fa_b1.items()
+                            }
                             rt_b1 = compute_response_metrics(
-                                G_run, fa_b1, loads, capacities, paths_b1, round_trip=True,
+                                G_run, fa_b1, loads, capacities, paths_b1_sc, round_trip=True,
                                 per_ctrl_ms=SYNC_DELAY_MS,
                             )
-                            usage_b1 = usage_on_paths_undirected(G_run, paths, fa_b1, loads, MSG_BITS_PER_REQ)
+                            usage_b1 = usage_on_paths_undirected(
+                                G_run, paths_b1_sc, fa_b1, loads, MSG_BITS_PER_REQ
+                            )
                             link_b1_stats = _link_stats(usage_b1, edge_caps)
                             lb_b1 = _ctrl_lb(fl_b1, capacities, usable_frac=1.0)
 
@@ -1560,49 +1584,35 @@ def main():
                             controllers=controllers,
                             loads=loads,
                             capacities=capacities,
-
-                            # MCF-ARC balanced assignment
+                            # All baselines start from the same balanced MCF-ARC snapshot.
                             init_assign=fa_mcf_arc,
-
                             dij=dij,
-                            paths_sc=paths_by_switch_final_arc,
+                            paths_sc=paths,
                             msg_bits=MSG_BITS_PER_REQ,
-
-                            usable_threshold=CAPACITY_THRESHOLD,
-                            overload_threshold=0.8,
-
+                            usable_threshold=0.90,
+                            overload_threshold=0.90,
                             alpha=0.5,
                             gamma=0.8,
                             population_size=50,
                             generations=150,
                             mutation_rate=0.10,
-
                             default_link_failure_prob=0.01,
                             default_node_failure_prob=0.01,
                             probability_aggregate="max",
                             enforce_capacity=True,
-
                             output_dir=ALG_DIR("PREF_CP_GA"),
                             seed=SEEDS["run"],
                             verbose=False,
-
                             topology_name=topo_name,
                             run_index=RUN_INDEX,
-
+                            run_number=RUN_INDEX + 1,
                             plot_recovery=True,
                             plot_pos=pos,
-                            plot_save_dir=ALG_DIR("PREF_CP_GA"),
-                            plot_file_tag=(
-                                f"PREF_CP_GA_run{RUN_INDEX:03d}_topo{idx:02d}"
-                            ),
-
-                            # Same resilience log root used by MCF-ARC
-                            resilience_log_dir=os.path.join(
-                                RUN_DIR,
-                                "resilience_logs"
-                            ),
-
-                            cost_mode=ROUTING_MODE,
+                            master_seed=args.master_seed,
+                            switch_seed=SEEDS["loads"],
+                            pre_failure_response_time_ms=init_mean_rt,
+                            sync_delay_ms=SYNC_DELAY_MS,
+                            comparison_csv_file=RECOVERY_COMPARISON_CSV,
                         )
                         solve_time_pref = time.perf_counter() - solve_start
 
@@ -1610,6 +1620,18 @@ def main():
                         # RESPONSE-TIME EVALUATION
                         # ======================================================
 
+                        # PREF returns recovery decisions, not routed paths.
+                        # Rebuild the same weighted shortest-path representation
+                        # used by the common RT evaluator.
+                        paths_b3 = {
+                            (s, c): ([s] if s == c else list(nx.shortest_path(
+                                G_run.to_undirected(), s, c, weight="weight"
+                            )))
+                            for s, c in fa_b3.items()
+                        }
+                        paths_b3_switch = {
+                            s: paths_b3[(s, c)] for s, c in fa_b3.items()
+                        }
                         rt_b3 = compute_response_metrics(
                             G_run,
                             fa_b3,
@@ -1621,10 +1643,10 @@ def main():
                         )
 
                         if "INFEASIBLE" in status_b3 or "TIME_LIMIT" in status_b3:
-                            log_failure("B3", "B3_INFEASIBLE", RUN_INDEX, topo_name, G_run, alpha, beta, k_path_count, sens)
+                            log_failure("PREF_CP_GA", "PREF_CP_GA_INFEASIBLE", RUN_INDEX, topo_name, G_run, alpha, beta, k_path_count, sens)
                         else:
                             usage_b3 = usage_on_paths_undirected(
-                                G_run, paths, fa_b3, loads, MSG_BITS_PER_REQ
+                                G_run, paths_b3, fa_b3, loads, MSG_BITS_PER_REQ
                             )
 
                             link_b3_stats = _link_stats(usage_b3, edge_caps)
@@ -1666,13 +1688,13 @@ def main():
                             plot_assignments(
                                 G_run, pos, switches, controllers,
                                 init_assign_cs, fa_b3, loads, fl_b3,
-                                topo_name, ALG_DIR("B3"), capacities,
-                                extra_title=f"B3 objective=EASM efficiency-aware heuristic",
-                                file_tag=f"B3_run{RUN_INDEX:03d}_topo{idx:02d}"
+                                topo_name, ALG_DIR("PREF_CP_GA"), capacities,
+                                extra_title="PREF-CP-GA recovery baseline",
+                                file_tag=f"PREF_CP_GA_run{RUN_INDEX:03d}_topo{idx:02d}"
                             )
 
                             _assert_dict("link_summary_init", link_sum_init)
-                            _assert_dict("link_summary_final_B3", summarize_link_usage(usage_b3, edge_caps))
+                            _assert_dict("link_summary_final_PREF_CP_GA", summarize_link_usage(usage_b3, edge_caps))
 
                             # ======================================================
                             # FINAL CONTROLLER LOADS
@@ -1693,7 +1715,7 @@ def main():
                             log_run_to_csv(
                                 logs_dir=RESULTS_FOLDER,
 
-                                algo="B3",
+                                algo="PREF_CP_GA",
 
                                 run_index=RUN_INDEX,
                                 topo=topo_name,
@@ -1803,7 +1825,7 @@ def main():
                                 topology=topo_name,
                                 run_index=RUN_INDEX,
                                 phase="SM",
-                                algo="B3",
+                                algo="PREF_CP_GA",
 
                                 G=G_run,
                                 usage_routed=usage_b3,
@@ -1836,7 +1858,7 @@ def main():
                                 switch_csv_file,
                                 topo_name,
                                 RUN_INDEX,
-                                "B3",
+                                "PREF_CP_GA",
                                 "SM",
 
                                 fa_b3,
@@ -1883,7 +1905,7 @@ def main():
                                 out_csv=controller_csv_file,
                                 topology=topo_name,
                                 run_index=RUN_INDEX,
-                                algo="B3",
+                                algo="PREF_CP_GA",
                                 phase="SM",
                                 controllers=controllers,
 
@@ -1907,8 +1929,65 @@ def main():
                                 controller_sens=0.0,
                             )
 
-                # ============================================================================
-                # ==========Baseline3:FLCF===================================================
+                    # =========================================================
+                    # BASELINE 3: FLCF (Fang et al., 2016)
+                    # The wrapper evaluates every single-controller failure and
+                    # uses the same recovery CSV and plotting handler as the
+                    # other models.
+                    # =========================================================
+                    if RUN_BASELINE3:
+                        current_algo = "FLCF_GA_2016"
+                        print(f"🚀 ENTERING BASELINE3 FLCF | run={RUN_INDEX}")
+                        (
+                            _fa_flcf,
+                            _paths_flcf,
+                            _paths_flcf_switch,
+                            _loads_flcf,
+                            _obj_flcf,
+                            _mig_flcf,
+                            _usage_flcf,
+                            _mip_flcf,
+                            status_flcf,
+                            meta_flcf,
+                        ) = run_baseline3_flcf_exact(
+                            G=G_run,
+                            switches=switches,
+                            controllers=controllers,
+                            loads=loads,
+                            capacities=capacities,
+                            init_assign=fa_mcf_arc,
+                            dij=dij,
+                            paths_sc=paths,
+                            msg_bits=MSG_BITS_PER_REQ,
+                            usable_threshold=0.90,
+                            overload_threshold=0.90,
+                            population_size=50,
+                            generations=150,
+                            mutation_rate=0.40,
+                            enforce_capacity=True,
+                            output_dir=ALG_DIR("FLCF_GA_2016"),
+                            seed=SEEDS["run"],
+                            verbose=False,
+                            topology_name=topo_name,
+                            run_index=RUN_INDEX,
+                            run_number=RUN_INDEX + 1,
+                            plot_recovery=True,
+                            plot_pos=pos,
+                            master_seed=args.master_seed,
+                            switch_seed=SEEDS["loads"],
+                            pre_failure_response_time_ms=init_mean_rt,
+                            sync_delay_ms=SYNC_DELAY_MS,
+                            comparison_csv_file=RECOVERY_COMPARISON_CSV,
+                            cost_mode=ROUTING_MODE,
+                        )
+                        if status_flcf not in ("SUCCESS", "PARTIAL"):
+                            log_failure(
+                                "FLCF_GA_2016", status_flcf, RUN_INDEX,
+                                topo_name, G_run, alpha, beta,
+                                k_path_count, sens,
+                            )
+
+
             except Exception as e:
                 print(f"❌ Error on run={RUN_INDEX} topo_idx={idx}: {type(e).__name__}({e!r})")
                 traceback.print_exc()
