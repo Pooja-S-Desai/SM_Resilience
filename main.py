@@ -1250,6 +1250,8 @@ def main():
                                 switch_seed=SEEDS["loads"],
                                 run_number=RUN_INDEX + 1,
                                 comparison_csv_file=RECOVERY_COMPARISON_CSV,
+                                edge_caps=edge_caps,
+                                msg_bits=MSG_BITS_PER_REQ,
                             )
                         #                         fa_b1, paths_b1, fl_b1, meta_b1, obj_val_b1, mip_b1, status_b1 = run_baseline1_FTFSM(
                         #     G=G_run,
@@ -1613,6 +1615,7 @@ def main():
                             pre_failure_response_time_ms=init_mean_rt,
                             sync_delay_ms=SYNC_DELAY_MS,
                             comparison_csv_file=RECOVERY_COMPARISON_CSV,
+                            edge_caps=edge_caps,
                         )
                         solve_time_pref = time.perf_counter() - solve_start
 
@@ -1979,6 +1982,7 @@ def main():
                             sync_delay_ms=SYNC_DELAY_MS,
                             comparison_csv_file=RECOVERY_COMPARISON_CSV,
                             cost_mode=ROUTING_MODE,
+                            edge_caps=edge_caps,
                         )
                         if status_flcf not in ("SUCCESS", "PARTIAL"):
                             log_failure(

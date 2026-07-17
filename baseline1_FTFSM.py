@@ -84,6 +84,8 @@ def run_baseline1_FTFSM(
     switch_seed: int | None = None,
     run_number: int | None = None,
     comparison_csv_file: str | None = None,
+    edge_caps: dict | None = None,
+    msg_bits: float = 128.0,
 ):
     switches = list(map(int, switches))
     controllers = list(map(int, controllers))
@@ -151,6 +153,8 @@ def run_baseline1_FTFSM(
                 switch_seed=switch_seed,
                 run_number=run_number,
                 comparison_csv_file=comparison_csv_file,
+                edge_caps=edge_caps,
+                msg_bits=msg_bits,
             )
 
             total_solve_time += float((meta_tmp or {}).get("solve_time_sec", 0.0))
@@ -791,6 +795,9 @@ def run_baseline1_FTFSM(
             file_tag=f"FTFSM_run{run_index:03d}_failC{failed_c}",
             switch_seed=switch_seed, master_seed=master_seed, run_number=run_number,
             reassignment_scope="global",
+            edge_caps=edge_caps,
+            msg_bits=msg_bits,
+            link_utilization_threshold=0.90,
         )
 
     meta = {

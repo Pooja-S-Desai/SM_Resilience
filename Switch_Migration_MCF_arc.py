@@ -1223,6 +1223,9 @@ def run_migration_optimizer_integrated_mcf_arc(
             run_number=run_number,
             reassignment_scope="orphan_only",
             sync_delay_ms=sync_per_ctrl_ms,
+            edge_caps=edge_caps_e,
+            msg_bits=msg_bits,
+            link_utilization_threshold=0.90,
         )
 
         failure_records[failed_c] = record

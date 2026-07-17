@@ -56,6 +56,7 @@ def compute_response_metrics(
     paths: Dict[Tuple[int, int], List[int]],  # shortest paths
     round_trip: bool = True,
     per_ctrl_ms: Optional[object] = None,     # ms (scalar or dict), additive constant delay
+    capacity_threshold: Optional[float] = None,
 ):
     """
     Total response time per switch:
@@ -74,7 +75,12 @@ def compute_response_metrics(
         lam[c] += float(loads.get(s, 0.0))
 
     # (2) Effective service rate: μ'_c
-    mu = {c: float(capacities[c]) * float(CAPACITY_THRESHOLD_mm1) for c in capacities}
+    threshold = (
+        float(CAPACITY_THRESHOLD_mm1)
+        if capacity_threshold is None
+        else float(capacity_threshold)
+    )
+    mu = {c: float(capacities[c]) * threshold for c in capacities}
 
     # (3) M/M/1 system time (in ms): W_ms = 1000 / (μ - λ)
     Wc_ms = {}
@@ -98,13 +104,23 @@ def compute_response_metrics(
     resp_ms_by_switch = {}
     rtfactor = 2.0 if round_trip else 1.0
 
+    if per_ctrl_ms is None:
+        per_ctrl_lookup = {}
+        default_extra_ms = 0.0
+    elif isinstance(per_ctrl_ms, dict):
+        per_ctrl_lookup = per_ctrl_ms
+        default_extra_ms = 0.0
+    else:
+        per_ctrl_lookup = {}
+        default_extra_ms = float(per_ctrl_ms)
+
     for s, c in assignment.items():
         p = paths.get((s, c), [])
         one_way_ms = path_latency_ms(G, p) if p else 0.0
         prop_ms = rtfactor * one_way_ms
 
         prop_ms_by_switch[s] = prop_ms
-        extra_ms = per_ctrl_ms
+        extra_ms = float(per_ctrl_lookup.get(c, default_extra_ms))
         resp_ms_by_switch[s] = prop_ms + Wc_ms.get(c, math.inf) + extra_ms
 
     # (6) Aggregate stats (ms)
@@ -131,7 +147,9 @@ def compute_response_metrics(
         "Wsys_by_ctrl": Wc_ms,                 # ms
         "prop_by_switch": prop_ms_by_switch,   # ms
         "T_final_ms_by_switch": resp_ms_by_switch,   # ms
+        "resp_by_switch": resp_ms_by_switch,         # ms, legacy/common alias
         "init_mean_rt_ms": mean_T,                   # ms
+        "mean_resp": mean_T,                         # ms, legacy/common alias
         "mad_resp": mad_T,                     # ms
         "max_resp": max_T, 
         "prop_max_ms": max_prop_ms,                    # ms

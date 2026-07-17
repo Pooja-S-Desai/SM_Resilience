@@ -386,15 +386,19 @@ RECOVERY_CSV_COLUMNS = [
     "number_of_switches_migrated", "migrated_switches", "orphan_migrations",
     "non_orphan_migrations", "failed_controller_number", "orphan_switches",
     "orphan_count", "post_failure_variance", "pre_failure_response_time_ms",
+    "post_failure_mean_switch_response_time_ms",
     "post_failure_max_switch_response_time_ms", "controller_loads_post_migration",
     "controller_utilization_post_migration", "post_failure_switch_assignment_with_loads",
     "uses_fractional_recovery", "fractional_switch_count",
     "fractional_controller_allocations", "fractional_load_allocations",
     "residual_by_switch", "overloaded_controllers",
     "total_orphan_load", "total_orphan_load_reassigned", "total_orphan_load_residual",
+    "total_orphan_load_unaccommodated", "new_controller_residual_by_switch",
     "new_controller_planned", "new_controller_id", "new_controller_capacity",
     "total_controller_capacity_after_plan", "new_controller_total_assigned_load",
-    "new_controller_utilization", "reassignment_scope",
+    "new_controller_utilization", "max_link_utilization_post_migration",
+    "violated_links_post_migration", "violated_link_count_post_migration",
+    "link_utilization_threshold", "reassignment_scope",
     "global_total_switch_load_unaccommodated", "feasibility", "mip_gap",
 ]
 
@@ -409,6 +413,96 @@ def _variance(values) -> float:
 
 def _json_cell(value) -> str:
     return json.dumps(_json_safe(value), separators=(",", ":"), sort_keys=True)
+
+
+def _edge_key(u, v):
+    u = int(u)
+    v = int(v)
+    return (u, v) if u < v else (v, u)
+
+
+def _normalize_edge_map(edge_map: Optional[Dict]) -> Dict[tuple, float]:
+    normalized = {}
+    for edge, value in (edge_map or {}).items():
+        try:
+            u, v = edge
+            normalized[_edge_key(u, v)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return normalized
+
+
+def _shortest_path_link_usage(
+    *,
+    G,
+    assignment: Dict[int, int],
+    loads: Dict[int, float],
+    msg_bits: float,
+    failed_controller: Optional[int] = None,
+    residual_by_switch: Optional[Dict] = None,
+) -> Dict[tuple, float]:
+    usage = defaultdict(float)
+    residual_switches = {int(s) for s in (residual_by_switch or {})}
+    graph = G.to_undirected() if G.is_directed() else G
+
+    for switch, controller in assignment.items():
+        switch = int(switch)
+        controller = int(controller)
+
+        if failed_controller is not None and controller == int(failed_controller):
+            continue
+        if switch in residual_switches:
+            continue
+
+        try:
+            path = (
+                [switch]
+                if switch == controller
+                else list(nx.shortest_path(graph, switch, controller, weight="weight"))
+            )
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            continue
+
+        traffic = float(loads.get(switch, 0.0)) * float(msg_bits)
+        for u, v in zip(path[:-1], path[1:]):
+            usage[_edge_key(u, v)] += traffic
+
+    return dict(usage)
+
+
+def _link_utilization_statistics(
+    *,
+    link_usage: Optional[Dict],
+    edge_caps: Optional[Dict],
+    threshold: float,
+) -> Dict[str, Any]:
+    capacities = _normalize_edge_map(edge_caps)
+    usage = _normalize_edge_map(link_usage)
+
+    max_util = 0.0
+    violated_links = {}
+
+    for edge, capacity in capacities.items():
+        if capacity <= 0.0:
+            continue
+
+        used = float(usage.get(edge, 0.0))
+        utilization = used / capacity
+        max_util = max(max_util, utilization)
+
+        if utilization > float(threshold) + TOL:
+            violated_links[edge] = {
+                "used_bits_per_sec": used,
+                "capacity_bits_per_sec": capacity,
+                "utilization": utilization,
+                "excess_over_threshold": utilization - float(threshold),
+            }
+
+    return {
+        "max_link_utilization": max_util,
+        "violated_links": violated_links,
+        "violated_link_count": len(violated_links),
+    }
 
 
 def _append_recovery_csv(output_file: str, row: Dict[str, Any]) -> None:
@@ -443,14 +537,37 @@ def _append_recovery_csv(output_file: str, row: Dict[str, Any]) -> None:
 
 
 def _shortest_path_response_metrics(
-    *, G, assignment, loads, capacities, sync_delay_ms=0.0, usable_threshold=0.8
+    *,
+    G,
+    assignment,
+    loads,
+    capacities,
+    sync_delay_ms=0.0,
+    usable_threshold=0.8,
+    failed_controller=None,
+    residual_by_switch=None,
 ):
     """Evaluate post-failure switch RT consistently using shortest paths and M/M/1."""
     try:
         from rt_metrics import compute_response_metrics
         paths = {}
         UG = G.to_undirected() if G.is_directed() else G
+        residual_switches = {
+            int(s) for s in (residual_by_switch or {})
+        }
+        rt_assignment = {}
         for s, c in assignment.items():
+            s = int(s)
+            c = int(c)
+            if failed_controller is not None and c == int(failed_controller):
+                continue
+            if s in residual_switches:
+                continue
+            if c not in capacities:
+                continue
+            rt_assignment[s] = c
+
+        for s, c in rt_assignment.items():
             if s == c:
                 paths[(s, c)] = [s]
             else:
@@ -458,10 +575,11 @@ def _shortest_path_response_metrics(
                     paths[(s, c)] = list(nx.shortest_path(UG, s, c, weight="weight"))
                 except Exception:
                     paths[(s, c)] = []
-        # compute_response_metrics uses the project's effective-capacity constant.
+        # Use the same capacity threshold that this recovery record reports.
         rt = compute_response_metrics(
-            G, assignment, loads, capacities, paths,
+            G, rt_assignment, loads, capacities, paths,
             round_trip=True, per_ctrl_ms=float(sync_delay_ms or 0.0),
+            capacity_threshold=float(usable_threshold),
         )
         return rt
     except Exception:
@@ -514,8 +632,13 @@ def process_failure_scenario(
     run_number: Optional[int] = None,
     reassignment_scope: str = "orphan_only",
     pre_failure_response_time_ms: Optional[float] = None,
+    post_failure_mean_switch_response_time_ms: Optional[float] = None,
     post_failure_max_switch_response_time_ms: Optional[float] = None,
     sync_delay_ms: float = 0.0,
+    edge_caps: Optional[Dict] = None,
+    link_usage: Optional[Dict] = None,
+    msg_bits: float = 128.0,
+    link_utilization_threshold: float = 0.90,
     write_csv: bool = True,
 ) -> Dict[str, Any]:
     """
@@ -664,7 +787,10 @@ def process_failure_scenario(
     post_caps_for_rt = dict(capacities)
     if backup_controller is not None and backup_capacity is not None:
         post_caps_for_rt[int(backup_controller)] = float(backup_capacity)
-    if post_failure_max_switch_response_time_ms is None:
+    if (
+        post_failure_mean_switch_response_time_ms is None
+        or post_failure_max_switch_response_time_ms is None
+    ):
         rt_post = _shortest_path_response_metrics(
             G=G,
             assignment=dominant_recovery_assignment,
@@ -672,8 +798,16 @@ def process_failure_scenario(
             capacities=post_caps_for_rt,
             sync_delay_ms=sync_delay_ms,
             usable_threshold=usable_threshold,
+            failed_controller=failed_controller,
+            residual_by_switch=residual_by_switch,
         )
-        post_failure_max_switch_response_time_ms = rt_post.get("max_resp")
+        if post_failure_mean_switch_response_time_ms is None:
+            post_failure_mean_switch_response_time_ms = rt_post.get(
+                "mean_resp",
+                rt_post.get("init_mean_rt_ms"),
+            )
+        if post_failure_max_switch_response_time_ms is None:
+            post_failure_max_switch_response_time_ms = rt_post.get("max_resp")
 
     total_survivor_usable_capacity = sum(
         float(usable_threshold) * float(complete_capacities.get(c, 0.0))
@@ -701,6 +835,41 @@ def process_failure_scenario(
         if backup_controller is not None and backup_capacity not in (None, 0) else 0.0
     )
 
+    new_controller_residual_by_switch = {}
+    if backup_controller is not None:
+        backup_controller_int = int(backup_controller)
+        for switch in sorted(int(s) for s in switches):
+            if (
+                int(initial_assignment.get(switch, -1)) == failed_controller
+                and int(dominant_recovery_assignment.get(switch, -1)) == backup_controller_int
+            ):
+                switch_load = float(loads.get(switch, 0.0))
+                new_controller_residual_by_switch[switch] = {
+                    "switch_load": switch_load,
+                    "residual_fraction": 1.0,
+                    "residual_load": switch_load,
+                    "assigned_controller": backup_controller_int,
+                }
+    new_controller_residual_load = sum(
+        float(info["residual_load"])
+        for info in new_controller_residual_by_switch.values()
+    )
+
+    if link_usage is None and edge_caps:
+        link_usage = _shortest_path_link_usage(
+            G=G,
+            assignment=dominant_recovery_assignment,
+            loads=loads,
+            msg_bits=float(msg_bits),
+            failed_controller=failed_controller,
+            residual_by_switch=residual_by_switch,
+        )
+    link_stats = _link_utilization_statistics(
+        link_usage=link_usage,
+        edge_caps=edge_caps,
+        threshold=float(link_utilization_threshold),
+    )
+
     record = {
         "algorithm": str(algorithm),
         "failed_controller": failed_controller,
@@ -726,13 +895,23 @@ def process_failure_scenario(
         "residual_by_switch": residual_by_switch,
         "residual_switch_count": len(residual_by_switch),
         "total_residual_load": float(total_residual_load),
+        "total_unaccommodated_residual_load": float(total_residual_load),
+        "new_controller_residual_by_switch": new_controller_residual_by_switch,
+        "new_controller_residual_load": float(new_controller_residual_load),
         "total_orphan_load_reassigned": total_orphan_load_reassigned,
         "backup_controller": backup_controller,
         "backup_capacity": backup_capacity,
         "reassignment_scope": str(reassignment_scope),
         "recovery_feasible": bool(recovery_feasible),
         "pre_failure_response_time_ms": pre_failure_response_time_ms,
+        "post_failure_mean_switch_response_time_ms": post_failure_mean_switch_response_time_ms,
         "post_failure_max_switch_response_time_ms": post_failure_max_switch_response_time_ms,
+        "link_usage_post_migration": _normalize_edge_map(link_usage),
+        "edge_capacities": _normalize_edge_map(edge_caps),
+        "max_link_utilization_post_migration": link_stats["max_link_utilization"],
+        "violated_links_post_migration": link_stats["violated_links"],
+        "violated_link_count_post_migration": link_stats["violated_link_count"],
+        "link_utilization_threshold": float(link_utilization_threshold),
     }
 
     if write_csv:
@@ -775,6 +954,7 @@ def process_failure_scenario(
             "orphan_count": len(orphan_switches),
             "post_failure_variance": _variance(complete_post_failure_loads.values()),
             "pre_failure_response_time_ms": pre_failure_response_time_ms,
+            "post_failure_mean_switch_response_time_ms": post_failure_mean_switch_response_time_ms,
             "post_failure_max_switch_response_time_ms": post_failure_max_switch_response_time_ms,
             "controller_loads_post_migration": _json_cell(complete_post_failure_loads),
             "controller_utilization_post_migration": _json_cell(utilization),
@@ -793,13 +973,19 @@ def process_failure_scenario(
             "overloaded_controllers": _json_cell(overloaded_controllers),
             "total_orphan_load": float(orphan_load),
             "total_orphan_load_reassigned": total_orphan_load_reassigned,
-            "total_orphan_load_residual": float(total_residual_load),
+            "total_orphan_load_residual": float(total_residual_load + new_controller_residual_load),
+            "total_orphan_load_unaccommodated": float(total_residual_load),
+            "new_controller_residual_by_switch": _json_cell(new_controller_residual_by_switch),
             "new_controller_planned": "YES" if backup_controller is not None else "NO",
             "new_controller_id": backup_controller,
             "new_controller_capacity": backup_capacity if backup_capacity is not None else 0.0,
             "total_controller_capacity_after_plan": sum(complete_capacities.values()),
             "new_controller_total_assigned_load": backup_assigned_load,
             "new_controller_utilization": backup_util,
+            "max_link_utilization_post_migration": link_stats["max_link_utilization"],
+            "violated_links_post_migration": _json_cell(link_stats["violated_links"]),
+            "violated_link_count_post_migration": link_stats["violated_link_count"],
+            "link_utilization_threshold": float(link_utilization_threshold),
             "reassignment_scope": str(reassignment_scope),
             "global_total_switch_load_unaccommodated": global_unaccommodated,
             "feasibility": "FEASIBLE" if recovery_feasible else "INFEASIBLE",

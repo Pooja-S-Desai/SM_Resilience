@@ -598,6 +598,7 @@ def run_baseline3_flcf_exact(
     sync_delay_ms=0.0,
     comparison_csv_file=None,
     cost_mode="weight",
+    edge_caps=None,
 ):
     """Run FLCF for all single-controller failures and match PREF outputs."""
     start = time.perf_counter()
@@ -663,6 +664,9 @@ def run_baseline3_flcf_exact(
                 reassignment_scope="orphan_only",
                 pre_failure_response_time_ms=pre_failure_response_time_ms,
                 sync_delay_ms=sync_delay_ms,
+                edge_caps=edge_caps,
+                msg_bits=float(msg_bits or 128.0),
+                link_utilization_threshold=0.90,
                 write_csv=True,
             )
         json_log = json_path

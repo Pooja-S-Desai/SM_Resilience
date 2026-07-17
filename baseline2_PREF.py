@@ -159,6 +159,7 @@ def run_pref_cp_ga_single_failure(
     default_node_failure_prob=0.01,
     probability_aggregate="max",
     enforce_capacity=False,
+    capacity_threshold=0.8,
     penalty_weight=1e9,
     seed=42,
     verbose=False,
@@ -178,35 +179,126 @@ def run_pref_cp_ga_single_failure(
         if final_assign.get(s) == failed_controller
     ]
 
-    fixed_assign = {
-        s: c for s, c in final_assign.items()
-        if c != failed_controller
-    }
+    decision_switches = list(switches)
 
     def make_chromosome():
-        return {s: rng.choice(survivors) for s in failed_switches}
+        """
+        Global chromosome: every switch has one controller-assignment gene.
+        Orphans must leave the failed controller; healthy switches usually
+        keep their current controller, with light randomization for diversity.
+        """
+        chromosome = {}
+
+        for s in decision_switches:
+            current_c = final_assign.get(s)
+
+            if current_c == failed_controller or current_c not in survivors:
+                chromosome[s] = rng.choice(survivors)
+            elif rng.random() < mutation_rate:
+                chromosome[s] = rng.choice(survivors)
+            else:
+                chromosome[s] = current_c
+
+        return chromosome
 
     def decode(chromosome):
-        recovered = dict(fixed_assign)
-        recovered.update(chromosome)
+        """Decode a complete global chromosome onto surviving controllers."""
+        recovered = {}
+
+        for s in decision_switches:
+            assigned_c = chromosome.get(s)
+
+            if assigned_c not in survivors:
+                current_c = final_assign.get(s)
+                assigned_c = current_c if current_c in survivors else rng.choice(survivors)
+
+            recovered[s] = assigned_c
+
         return recovered
+
+    def repair_chromosome(chromosome):
+        """
+        Enforce survivor-only assignments and the gamma reassignment budget.
+        Mandatory orphan migrations are preserved; optional healthy-switch
+        migrations are reverted first if the budget is exceeded.
+        """
+        repaired = dict(chromosome)
+
+        for s in decision_switches:
+            if repaired.get(s) not in survivors:
+                current_c = final_assign.get(s)
+                repaired[s] = current_c if current_c in survivors else rng.choice(survivors)
+
+        max_reassignments = max(
+            len(failed_switches),
+            int(math.floor(gamma * len(decision_switches))),
+        )
+        changed_switches = [
+            s for s in decision_switches
+            if repaired.get(s) != final_assign.get(s)
+        ]
+        excess = len(changed_switches) - max_reassignments
+
+        if excess > 0:
+            optional_changes = [
+                s for s in changed_switches
+                if final_assign.get(s) != failed_controller
+            ]
+            rng.shuffle(optional_changes)
+
+            for s in optional_changes[:excess]:
+                repaired[s] = final_assign[s]
+
+        return repaired
+
+    def make_orphan_only_seed():
+        chromosome = dict(final_assign)
+
+        for s in failed_switches:
+            chromosome[s] = rng.choice(survivors)
+
+        return repair_chromosome(chromosome)
 
     def reassignment_cost(chromosome):
         recovered = decode(chromosome)
         return sum(
-            1 for s in switches
+            1 for s in decision_switches
             if final_assign.get(s) != recovered.get(s)
         )
 
     def reassignment_violation(chromosome):
-        return max(0.0, reassignment_cost(chromosome) - gamma * len(switches))
+        max_allowed = max(
+            len(failed_switches),
+            int(math.floor(gamma * len(decision_switches))),
+        )
+        return max(0.0, reassignment_cost(chromosome) - max_allowed)
+
+    def migration_breakdown(chromosome):
+        recovered = decode(chromosome)
+
+        orphan_migrations = []
+        non_orphan_migrations = []
+
+        for s in decision_switches:
+            old_c = final_assign.get(s)
+            new_c = recovered.get(s)
+
+            if old_c == new_c:
+                continue
+
+            if old_c == failed_controller:
+                orphan_migrations.append(s)
+            else:
+                non_orphan_migrations.append(s)
+
+        return orphan_migrations, non_orphan_migrations
 
     def capacity_violation(assign):
         ctrl_loads = compute_controller_loads(assign, survivors, loads)
         violation = 0.0
 
         for c in survivors:
-            allowed = (1.0 - alpha) * float(capacities[c])
+            allowed = float(capacity_threshold) * float(capacities[c])
             violation += max(0.0, ctrl_loads[c] - allowed)
 
         return violation
@@ -248,33 +340,30 @@ def run_pref_cp_ga_single_failure(
         return min(candidates, key=compute_fitness)
 
     def crossover(parent1, parent2):
+        """Uniform crossover over the complete switch set."""
         child = {}
 
-        for s in failed_switches:
-            trial1 = dict(child)
-            trial2 = dict(child)
+        for s in decision_switches:
+            child[s] = parent1[s] if rng.random() < 0.5 else parent2[s]
 
-            trial1[s] = parent1[s]
-            trial2[s] = parent2[s]
-
-            for rem in failed_switches:
-                if rem not in trial1:
-                    trial1[rem] = rng.choice(survivors)
-                if rem not in trial2:
-                    trial2[rem] = rng.choice(survivors)
-
-            child[s] = parent1[s] if compute_fitness(trial1) <= compute_fitness(trial2) else parent2[s]
-
-        return child
+        return repair_chromosome(child)
 
     def mutate(chromosome):
+        """Mutate orphan and healthy switch genes, then repair globally."""
         mutated = dict(chromosome)
 
-        for s in failed_switches:
+        for s in decision_switches:
             if rng.random() < mutation_rate:
-                mutated[s] = rng.choice(survivors)
+                current_choice = mutated.get(s)
+                alternatives = [
+                    c for c in survivors
+                    if c != current_choice
+                ]
 
-        return mutated
+                if alternatives:
+                    mutated[s] = rng.choice(alternatives)
+
+        return repair_chromosome(mutated)
 
     if not failed_switches:
         recovery_assign = dict(final_assign)
@@ -310,9 +399,21 @@ def run_pref_cp_ga_single_failure(
             "reassignment_cost": 0,
             "capacity_violation": 0.0,
             "reassignment_violation": 0.0,
+            "reassignment_scope": "global",
+            "orphan_migration_count": 0,
+            "non_orphan_migration_count": 0,
+            "orphan_migration_switches": [],
+            "non_orphan_migration_switches": [],
+            "orphan_migrated_load": 0.0,
+            "non_orphan_migrated_load": 0.0,
+            "total_migrated_load": 0.0,
+            "migrated_switches": {},
         }
 
-    population = [make_chromosome() for _ in range(population_size)]
+    population = [make_orphan_only_seed()]
+
+    while len(population) < population_size:
+        population.append(repair_chromosome(make_chromosome()))
 
     best = min(population, key=compute_fitness)
     best_fit = compute_fitness(best)
@@ -330,6 +431,7 @@ def run_pref_cp_ga_single_failure(
 
             child = crossover(p1, p2)
             child = mutate(child)
+            child = repair_chromosome(child)
 
             new_population.append(child)
 
@@ -348,8 +450,24 @@ def run_pref_cp_ga_single_failure(
                 f"generation={gen}, fitness={best_fit:.6f}"
             )
 
+    best = repair_chromosome(best)
     recovery_assign = decode(best)
     recovery_loads = compute_controller_loads(recovery_assign, survivors, loads)
+    orphan_migrations, non_orphan_migrations = migration_breakdown(best)
+
+    orphan_migrated_load = sum(float(loads[s]) for s in orphan_migrations)
+    non_orphan_migrated_load = sum(float(loads[s]) for s in non_orphan_migrations)
+    total_migrated_load = orphan_migrated_load + non_orphan_migrated_load
+    migration_records = {
+        s: {
+            "from": final_assign.get(s),
+            "to": recovery_assign.get(s),
+            "is_orphan": final_assign.get(s) == failed_controller,
+            "load": float(loads[s]),
+        }
+        for s in decision_switches
+        if final_assign.get(s) != recovery_assign.get(s)
+    }
 
     sigma = load_std(recovery_loads)
 
@@ -393,6 +511,15 @@ def run_pref_cp_ga_single_failure(
         "reassignment_cost": reassignment_cost(best),
         "capacity_violation": cap_v,
         "reassignment_violation": reass_v,
+        "reassignment_scope": "global",
+        "orphan_migration_count": len(orphan_migrations),
+        "non_orphan_migration_count": len(non_orphan_migrations),
+        "orphan_migration_switches": orphan_migrations,
+        "non_orphan_migration_switches": non_orphan_migrations,
+        "orphan_migrated_load": orphan_migrated_load,
+        "non_orphan_migrated_load": non_orphan_migrated_load,
+        "total_migrated_load": total_migrated_load,
+        "migrated_switches": migration_records,
     }
 
 
@@ -418,6 +545,7 @@ def run_pref_cp_ga_all_failures(
     default_node_failure_prob=0.01,
     probability_aggregate="max",
     enforce_capacity=False,
+    capacity_threshold=0.8,
     seed=42,
     verbose=False,
 ):
@@ -443,6 +571,7 @@ def run_pref_cp_ga_all_failures(
             default_node_failure_prob=default_node_failure_prob,
             probability_aggregate=probability_aggregate,
             enforce_capacity=enforce_capacity,
+            capacity_threshold=capacity_threshold,
             seed=seed + idx,
             verbose=verbose,
         )
@@ -478,7 +607,10 @@ def save_pref_cp_logs(results, output_dir):
             "failed_controller,status,num_failed_switches,"
             "reassignment_cost,sigma,load_deviation,p_tilde,"
             "objective,fitness_with_penalty,capacity_violation,"
-            "reassignment_violation\n"
+            "reassignment_violation,reassignment_scope,"
+            "orphan_migration_count,non_orphan_migration_count,"
+            "orphan_migrated_load,non_orphan_migrated_load,"
+            "total_migrated_load\n"
         )
 
         for failed_c, r in results.items():
@@ -487,7 +619,13 @@ def save_pref_cp_logs(results, output_dir):
                 f"{r['reassignment_cost']},{r['sigma']},"
                 f"{r['load_deviation']},{r['p_tilde']},"
                 f"{r['objective']},{r['fitness_with_penalty']},"
-                f"{r['capacity_violation']},{r['reassignment_violation']}\n"
+                f"{r['capacity_violation']},{r['reassignment_violation']},"
+                f"{r.get('reassignment_scope', 'global')},"
+                f"{r.get('orphan_migration_count', 0)},"
+                f"{r.get('non_orphan_migration_count', 0)},"
+                f"{r.get('orphan_migrated_load', 0.0)},"
+                f"{r.get('non_orphan_migrated_load', 0.0)},"
+                f"{r.get('total_migrated_load', 0.0)}\n"
             )
 
     return json_path, csv_path
@@ -704,6 +842,7 @@ def run_baseline_pref_cp_ga_exact(
     pre_failure_response_time_ms=None,
     sync_delay_ms=0.0,
     comparison_csv_file=None,
+    edge_caps=None,
 ):
     solve_start = time.perf_counter()
 
@@ -731,6 +870,7 @@ def run_baseline_pref_cp_ga_exact(
         default_node_failure_prob=default_node_failure_prob,
         probability_aggregate=probability_aggregate,
         enforce_capacity=enforce_capacity,
+        capacity_threshold=overload_threshold,
         seed=seed,
         verbose=verbose,
     )
@@ -762,7 +902,10 @@ def run_baseline_pref_cp_ga_exact(
                 usable_threshold=float(overload_threshold),
                 initial_assignment=final_assign,
                 recovery_assignment=result.get("recovery_assign", {}),
-                residual_by_switch={},
+                residual_by_switch={
+                    s: 0.0
+                    for s in result.get("failed_switches", [])
+                },
                 status=result.get("status", "UNKNOWN"),
                 solve_time_sec=float(solve_time),
                 objective_value=result.get("objective"),
@@ -774,9 +917,15 @@ def run_baseline_pref_cp_ga_exact(
                 master_seed=master_seed,
                 switch_seed=switch_seed if switch_seed is not None else seed,
                 run_number=run_number,
-                reassignment_scope="orphan_only",
+                reassignment_scope=result.get(
+                    "reassignment_scope",
+                    "global",
+                ),
                 pre_failure_response_time_ms=pre_failure_response_time_ms,
                 sync_delay_ms=sync_delay_ms,
+                edge_caps=edge_caps,
+                msg_bits=float(msg_bits or 128.0),
+                link_utilization_threshold=0.90,
                 write_csv=True,
             )
         plot_paths = {
@@ -843,6 +992,7 @@ def run_baseline_pref_cp_ga_exact(
         "default_link_failure_prob": default_link_failure_prob,
         "default_node_failure_prob": default_node_failure_prob,
         "enforce_capacity": enforce_capacity,
+        "capacity_threshold": overload_threshold,
         "solve_time_sec": solve_time,
         "all_failure_results": results,
         "failure_scenarios": scenario_records,
