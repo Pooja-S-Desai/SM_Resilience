@@ -2,15 +2,18 @@
 
 import os
 import math
+import time
 import gurobipy as gp
 from gurobipy import GRB
 import networkx as nx
 from helpers import (
     RESULTS_FOLDER,
     CAPACITY_THRESHOLD as GLOBAL_THRESHOLD,
+    OVERLOAD_THRESHOLD,
     TIME_LIMIT
 )
 from rt_metrics import build_paths_sc_from_switch_paths
+from failure_scenario_handler import process_failure_scenario
 os.makedirs(RESULTS_FOLDER, exist_ok=True)
 
 
@@ -40,6 +43,15 @@ def run_migration_optimizer(
     cost_mode: str = "weight",           # "weight" (geo) or "hops"
     alpha:float,
     beta:float,
+    gamma_res: float = 1.0,
+    run_index: int = 0,
+    plot_recovery: bool = False,
+    plot_pos: dict | None = None,
+    plot_save_dir: str | None = None,
+    master_seed: int | None = None,
+    switch_seed: int | None = None,
+    run_number: int | None = None,
+    comparison_csv_file: str | None = None,
     
 ):
     """
@@ -198,12 +210,138 @@ def run_migration_optimizer(
     else:
         raise ValueError(f"Unknown objective_type: {objective_type}")
 
-    # Combine with ALPHA/BETA (normalize; if both zero, default to ALPHA=1, BETA=0)
+    # ---------- Proactive single-controller-failure recovery ----------
+    # Keep the shortest-path load-balancing model above unchanged and add the
+    # same recovery decisions used by MCF-ARC.
+    backup_pairs = [
+        (s, failed, target)
+        for s in switches
+        for failed in controllers
+        for target in controllers
+        if target != failed
+    ]
+    bkp = model.addVars(backup_pairs, vtype=GRB.BINARY, name="backup")
+    residual_pairs = [(s, failed) for s in switches for failed in controllers]
+    residual = model.addVars(residual_pairs, vtype=GRB.BINARY, name="residual_backup")
+
+    residual_candidates = [int(v) for v in G.nodes() if v not in controllers]
+    rctrl_pairs = [(failed, v) for failed in controllers for v in residual_candidates]
+    rctrl = model.addVars(rctrl_pairs, vtype=GRB.BINARY, name="residual_controller")
+    residual_location_pairs = [
+        (s, failed, v)
+        for s in switches
+        for failed in controllers
+        for v in residual_candidates
+    ]
+    residual_at = model.addVars(
+        residual_location_pairs, vtype=GRB.BINARY, name="residual_at"
+    )
+
+    for s in switches:
+        for failed in controllers:
+            model.addConstr(
+                gp.quicksum(bkp[s, failed, target] for target in controllers if target != failed)
+                + residual[s, failed]
+                == y[s, failed],
+                name=f"backup_or_residual_{s}_{failed}",
+            )
+
+            if residual_candidates:
+                model.addConstr(
+                    gp.quicksum(residual_at[s, failed, v] for v in residual_candidates)
+                    == residual[s, failed],
+                    name=f"locate_residual_{s}_{failed}",
+                )
+                for v in residual_candidates:
+                    model.addConstr(
+                        residual_at[s, failed, v] <= rctrl[failed, v],
+                        name=f"residual_uses_controller_{s}_{failed}_{v}",
+                    )
+            else:
+                model.addConstr(residual[s, failed] == 0, name=f"no_residual_site_{s}_{failed}")
+
+    for failed in controllers:
+        model.addConstr(
+            gp.quicksum(rctrl[failed, v] for v in residual_candidates) <= 1,
+            name=f"one_residual_controller_{failed}",
+        )
+        for target in controllers:
+            if target == failed:
+                continue
+            recovered = gp.quicksum(
+                float(loads[s]) * bkp[s, failed, target] for s in switches
+            )
+            model.addConstr(
+                load_expr[target] + recovered
+                <= GLOBAL_THRESHOLD * float(capacities[target]),
+                name=f"backup_cap_fail_{failed}_to_{target}",
+            )
+
+    residual_load = {
+        failed: gp.quicksum(float(loads[s]) * residual[s, failed] for s in switches)
+        for failed in controllers
+    }
+    postfail_lmax = {}
+    postfail_lmin = {}
+    big_load = sum(float(loads[s]) for s in switches)
+    for failed in controllers:
+        postfail_lmax[failed] = model.addVar(lb=0.0, name=f"postfail_Lmax_{failed}")
+        postfail_lmin[failed] = model.addVar(lb=0.0, name=f"postfail_Lmin_{failed}")
+        for target in controllers:
+            if target == failed:
+                continue
+            recovered = gp.quicksum(
+                float(loads[s]) * bkp[s, failed, target] for s in switches
+            )
+            post_load = load_expr[target] + recovered
+            model.addConstr(post_load <= postfail_lmax[failed])
+            model.addConstr(post_load >= postfail_lmin[failed])
+        if residual_candidates:
+            opened = gp.quicksum(rctrl[failed, v] for v in residual_candidates)
+            model.addConstr(residual_load[failed] <= postfail_lmax[failed] + big_load * (1 - opened))
+            model.addConstr(residual_load[failed] >= postfail_lmin[failed] - big_load * (1 - opened))
+
+    backup_load_cost = gp.quicksum(
+        float(loads[s]) * bkp[s, failed, target]
+        for s, failed, target in backup_pairs
+    )
+    residual_cost = (
+        1e6 * gp.quicksum(residual_load[failed] for failed in controllers)
+        + 1e5 * gp.quicksum(rctrl[failed, v] for failed, v in rctrl_pairs)
+    )
+    backup_distance_cost = gp.quicksum(
+        float(dij.get((s, target), 0.0)) * bkp[s, failed, target]
+        for s, failed, target in backup_pairs
+    )
+    residual_distance_cost = gp.LinExpr()
+    graph_for_distance = G.to_undirected() if G.is_directed() else G
+    for s, failed, v in residual_location_pairs:
+        try:
+            distance = float(nx.shortest_path_length(graph_for_distance, s, v, weight="weight"))
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            distance = big_load
+        residual_distance_cost += distance * residual_at[s, failed, v]
+
+    post_failure_balance = gp.quicksum(
+        postfail_lmax[failed] - postfail_lmin[failed] for failed in controllers
+    )
+    resiliency_obj = (
+        backup_load_cost + residual_cost + backup_distance_cost
+        + residual_distance_cost + post_failure_balance
+    )
+
+    # Combine base load balancing, migration cost, and resilience.
     a = float(alpha)
     b = float(beta)
+    g = float(gamma_res)
+    weight_sum = max(0.0, a) + max(0.0, b) + max(0.0, g)
+    if weight_sum <= 0.0:
+        a, b, g = 1.0, 0.0, 0.0
+    else:
+        a, b, g = max(0.0, a) / weight_sum, max(0.0, b) / weight_sum, max(0.0, g) / weight_sum
 
     # Final multi-objective
-    model.setObjective(a * base_obj + b * migration_cost_expr, GRB.MINIMIZE)
+    model.setObjective(a * base_obj + b * migration_cost_expr + g * resiliency_obj, GRB.MINIMIZE)
 
 
     # ---------- Solve ----------
@@ -218,7 +356,9 @@ def run_migration_optimizer(
     # SOLVE + STATUS HANDLING (SHORTEST PATH OPTIMIZER)
     # ============================================================
 
+    solve_started = time.perf_counter()
     model.optimize()
+    solve_time_sec = time.perf_counter() - solve_started
 
     # -----------------------------
     # INFEASIBLE → IIS
@@ -341,6 +481,83 @@ def run_migration_optimizer(
 
     paths_sc = build_paths_sc_from_switch_paths(final_assign, paths)
 
-
     obj_val = float(model.objVal) if model.SolCount > 0 else None
+    selected_residual_controller = {
+        int(failed): int(v)
+        for (failed, v), variable in rctrl.items()
+        if variable.X > 0.5
+    }
+
+    output_root = plot_save_dir or os.path.join(RESULTS_FOLDER, "SHORTEST_RESILIENT")
+    for failed in controllers:
+        failed = int(failed)
+        recovery_assignment = dict(final_assign)
+        residual_by_switch = {}
+        orphan_switches = [
+            int(s) for s in switches if int(final_assign.get(s, -1)) == failed
+        ]
+        residual_controller = selected_residual_controller.get(failed)
+
+        for s in orphan_switches:
+            assigned = False
+            for target in controllers:
+                if int(target) == failed:
+                    continue
+                if bkp[s, failed, target].X > 0.5:
+                    recovery_assignment[s] = int(target)
+                    assigned = True
+                    break
+            if not assigned and residual[s, failed].X > 0.5:
+                if residual_controller is not None:
+                    recovery_assignment[s] = residual_controller
+                else:
+                    residual_by_switch[s] = {
+                        "residual_fraction": 1.0,
+                        "residual_load": float(loads[s]),
+                    }
+
+        backup_capacity = None
+        if residual_controller is not None:
+            backup_capacity = 1.20 * sum(
+                float(loads[s]) for s in orphan_switches
+                if residual[s, failed].X > 0.5
+            )
+
+        process_failure_scenario(
+            algorithm="SHORTEST_RESILIENT",
+            topology_name=topology_name or "topology",
+            run_index=run_index,
+            failed_controller=failed,
+            G=G,
+            pos=plot_pos,
+            switches=switches,
+            controllers=controllers,
+            loads=loads,
+            capacities=capacities,
+            usable_threshold=float(GLOBAL_THRESHOLD),
+            overload_threshold=float(OVERLOAD_THRESHOLD),
+            initial_assignment=final_assign,
+            recovery_assignment=recovery_assignment,
+            fractional_assignment={},
+            residual_by_switch=residual_by_switch,
+            status=status_msg,
+            solve_time_sec=solve_time_sec,
+            objective_value=obj_val,
+            mip_gap=mip_gap_solved,
+            backup_controller=residual_controller,
+            backup_capacity=backup_capacity,
+            output_root=output_root,
+            comparison_csv_file=comparison_csv_file,
+            make_plot=plot_recovery,
+            file_tag=f"SHORTEST_RESILIENT_run{run_index:03d}_failC{failed}",
+            master_seed=master_seed,
+            switch_seed=switch_seed,
+            run_number=run_number,
+            reassignment_scope="orphan_only",
+            sync_delay_ms=sync_per_ctrl_ms,
+            edge_caps=edge_caps_e,
+            msg_bits=msg_bits,
+            link_utilization_threshold=0.90,
+        )
+
     return final_assign, final_loads, paths_sc,obj_val, migration_count, mip_gap_solved,status_msg

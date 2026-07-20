@@ -381,7 +381,11 @@ RECOVERY_CSV_COLUMNS = [
     "status", "objective_value", "switch_loads", "controller_capacities",
     "initial_switch_assignment", "recovery_assignment_dominant",
     "controller_loads_initial",
-    "max_minus_min_controller_loads_initial", "variance_controller_loads_initial",
+    "max_minus_min_controller_loads_initial",
+    "max_minus_min_controller_loads_final",
+    "max_controller_load_initial", "max_controller_load_final",
+    "min_controller_load_initial", "min_controller_load_final",
+    "variance_controller_loads_initial",
     "solve_time_sec", "migration_cost", "number_of_migrations",
     "number_of_switches_migrated", "migrated_switches", "orphan_migrations",
     "non_orphan_migrations", "failed_controller_number", "orphan_switches",
@@ -391,6 +395,7 @@ RECOVERY_CSV_COLUMNS = [
     "controller_utilization_post_migration", "post_failure_switch_assignment_with_loads",
     "uses_fractional_recovery", "fractional_switch_count",
     "fractional_controller_allocations", "fractional_load_allocations",
+    "fractional_assignment_details",
     "residual_by_switch", "overloaded_controllers",
     "total_orphan_load", "total_orphan_load_reassigned", "total_orphan_load_residual",
     "total_orphan_load_unaccommodated", "new_controller_residual_by_switch",
@@ -543,7 +548,7 @@ def _shortest_path_response_metrics(
     loads,
     capacities,
     sync_delay_ms=0.0,
-    usable_threshold=0.8,
+    usable_threshold=0.95,
     failed_controller=None,
     residual_by_switch=None,
 ):
@@ -600,6 +605,7 @@ def process_failure_scenario(
     loads: Dict[int, float],
     capacities: Dict[int, float],
     usable_threshold: float,
+    overload_threshold: float = 0.90,
 
     initial_assignment: Dict[int, int],
 
@@ -759,7 +765,7 @@ def process_failure_scenario(
 
     overloaded_controllers = [
         int(c) for c, value in utilization.items()
-        if value > float(usable_threshold) + TOL
+        if value > float(overload_threshold) + TOL
     ]
 
     total_residual_load = sum(
@@ -822,8 +828,8 @@ def process_failure_scenario(
     recovery_feasible = (
         "INFEASIBLE" not in str(status).upper()
         and "NO_SOLUTION" not in str(status).upper()
-        and not overloaded_controllers
         and total_residual_load <= TOL
+        and global_unaccommodated <= TOL
     )
 
     backup_assigned_load = (
@@ -941,6 +947,21 @@ def process_failure_scenario(
             "max_minus_min_controller_loads_initial": (
                 max(initial_loads.values()) - min(initial_loads.values()) if initial_loads else 0.0
             ),
+            "max_minus_min_controller_loads_final": (
+                max(complete_post_failure_loads.values())
+                - min(complete_post_failure_loads.values())
+                if complete_post_failure_loads else 0.0
+            ),
+            "max_controller_load_initial": max(initial_loads.values()) if initial_loads else 0.0,
+            "max_controller_load_final": (
+                max(complete_post_failure_loads.values())
+                if complete_post_failure_loads else 0.0
+            ),
+            "min_controller_load_initial": min(initial_loads.values()) if initial_loads else 0.0,
+            "min_controller_load_final": (
+                min(complete_post_failure_loads.values())
+                if complete_post_failure_loads else 0.0
+            ),
             "variance_controller_loads_initial": _variance(initial_loads.values()),
             "solve_time_sec": float(solve_time_sec),
             "migration_cost": migration_stats["total_migrations"],
@@ -966,6 +987,24 @@ def process_failure_scenario(
                 int(s): {
                     int(c): float(loads.get(int(s), 0.0)) * float(fraction)
                     for c, fraction in targets.items()
+                }
+                for s, targets in fractional_assignment.items()
+            }),
+            "fractional_assignment_details": _json_cell({
+                int(s): {
+                    "switch_load": float(loads.get(int(s), 0.0)),
+                    "controller_fractions": {
+                        int(c): float(fraction) for c, fraction in targets.items()
+                    },
+                    "controller_load_allocations": {
+                        int(c): float(loads.get(int(s), 0.0)) * float(fraction)
+                        for c, fraction in targets.items()
+                    },
+                    "assigned_fraction": sum(float(fraction) for fraction in targets.values()),
+                    "assigned_load": sum(
+                        float(loads.get(int(s), 0.0)) * float(fraction)
+                        for fraction in targets.values()
+                    ),
                 }
                 for s, targets in fractional_assignment.items()
             }),
@@ -1066,7 +1105,7 @@ def process_failure_scenario(
                 backup_controller=backup_controller,
                 backup_capacity=backup_capacity,
                 migration_count=migration_stats["total_migrations"],
-                capacity_threshold=usable_threshold,
+                capacity_threshold=overload_threshold,
 
                 file_tag=common_tag,
             )
@@ -1095,7 +1134,7 @@ def process_failure_scenario(
                 backup_controller=backup_controller,
                 backup_capacity=backup_capacity,
                 migration_count=migration_stats["total_migrations"],
-                capacity_threshold=usable_threshold,
+                capacity_threshold=overload_threshold,
 
                 file_tag=integral_tag,
             )

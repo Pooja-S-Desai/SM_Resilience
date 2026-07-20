@@ -67,7 +67,8 @@ def run_baseline1_FTFSM(
     dij: Optional[dict] = None,
     Dcc: Optional[dict] = None,
     *,
-    usable_threshold: float = 0.90,
+    usable_threshold: float = 0.95,
+    overload_threshold: float = 0.90,
     rule_install_cost: float = 0.0,
     epsilon: float = 1.0,
     omega: Optional[List[int]] = None,
@@ -92,6 +93,26 @@ def run_baseline1_FTFSM(
     init_assign = {int(s): int(c) for s, c in dict(init_assign).items()}
     loads = {int(s): float(v) for s, v in dict(loads).items()}
     capacities = {int(c): float(v) for c, v in dict(capacities).items()}
+
+    missing_assignments = [i for i in switches if i not in init_assign]
+    if missing_assignments:
+        preview = ", ".join(map(str, missing_assignments[:10]))
+        suffix = "..." if len(missing_assignments) > 10 else ""
+        raise ValueError(
+            "FTFSM requires one initial controller assignment per switch; "
+            f"missing {len(missing_assignments)} switch(es): {preview}{suffix}"
+        )
+
+    invalid_controllers = {
+        i: init_assign[i]
+        for i in switches
+        if init_assign[i] not in controllers
+    }
+    if invalid_controllers:
+        raise ValueError(
+            "FTFSM initial assignments reference controllers outside the "
+            f"controller set: {invalid_controllers}"
+        )
 
 
     if omega is None:
@@ -136,6 +157,7 @@ def run_baseline1_FTFSM(
                 dij=dij,
                 Dcc=Dcc,
                 usable_threshold=usable_threshold,
+                overload_threshold=overload_threshold,
                 rule_install_cost=rule_install_cost,
                 epsilon=epsilon,
                 omega=[failed_c],
@@ -344,22 +366,11 @@ def run_baseline1_FTFSM(
                 name=f"eq3d_b_le_x_{i}_{j}"
             )
 
-    # In the requested single-failure plan, switches whose original
-    # controller survives remain unchanged. Only traffic belonging to the
-    # failed controller is fractionally redistributed among survivors. This
-    # matches the paper's failure examples and makes recovery comparable with
-    # the orphan-only MCF-ARC/PREF/FLCF plans.
-    if not normal_mode:
-        failed_controller = int(omega[0])
-        for i in switches:
-            original_controller = int(init_assign[i])
-            if original_controller == failed_controller:
-                continue
-            for j in controllers:
-                model.addConstr(
-                    b[i, j] == (1.0 if j == original_controller else 0.0),
-                    name=f"survivor_fixed_{i}_{j}_fail{failed_controller}",
-                )
+    # Global fractional recovery: after a controller failure, traffic from
+    # every switch may be split among any surviving controllers.  This is the
+    # flexibility represented by b_i^j; restricting surviving switches to
+    # their original controller would turn FTFSM into orphan-only recovery
+    # even though its reported reassignment scope is global.
 
     # -----------------------------
     # Eq. (3e): f_i^{j,j'}(w) <= m_{j'}^w.  The destination
@@ -784,6 +795,7 @@ def run_baseline1_FTFSM(
             failed_controller=failed_c,
             G=G, pos=plot_pos, switches=switches, controllers=controllers,
             loads=loads, capacities=capacities, usable_threshold=usable_threshold,
+            overload_threshold=overload_threshold,
             initial_assignment=init_assign,
             recovery_assignment=recovery_assignments.get(failed_c, {}),
             fractional_assignment=frac_plan,
@@ -822,6 +834,7 @@ def run_baseline1_FTFSM(
         "recovery_loads_by_failure": recovery_loads_by_failure,
         "b_fractional_assignment": b_values,
         "f_fractional_migration": f_values,
+        "reassignment_scope": "global",
         "paths_pair": paths_pair,
         "failure_scenarios": scenario_records,
     }

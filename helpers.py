@@ -15,15 +15,18 @@ import hashlib
 # ----- Configure master list of run seeds -----
 # =========================================================================================================
 
-_MASTER_SEED = 40       # change if you want a different seed list
-_NUM_RUNS    = 5
+_MASTER_SEED = 40
+_NUM_RUNS    = 25
 
-random.seed(_MASTER_SEED)
-_SEED_LIST = [random.randint(1, 10**9) for _ in range(_NUM_RUNS)]
+_seed_rng = random.Random(_MASTER_SEED)
+# sample() guarantees that every configured run gets a distinct canonical seed.
+_SEED_LIST = _seed_rng.sample(range(1, 10**9 + 1), _NUM_RUNS)
 
 def get_seed(run_idx: int) -> int:
     """Return the canonical seed for the k-th run (0..N-1)."""
-    return _SEED_LIST[run_idx % len(_SEED_LIST)]
+    if not 0 <= run_idx < _NUM_RUNS:
+        raise IndexError(f"run_idx must be in [0, {_NUM_RUNS - 1}], got {run_idx}")
+    return _SEED_LIST[run_idx]
 
 def subseed(run_seed: int, label: str) -> int:
     h = hashlib.blake2b(f"{label}|{run_seed}".encode(), digest_size=8).hexdigest()
@@ -89,7 +92,10 @@ CONTROL_SHARE = 0.10
 # CAPACITY / QUEUE MODEL
 # =============================
 
-CAPACITY_THRESHOLD = 0.8   # M/M/1 stability threshold
+# Controllers may carry load up to 95% of their raw capacity.  Overload
+# reporting is deliberately stricter: anything above 90% is flagged.
+CAPACITY_THRESHOLD = 0.95
+OVERLOAD_THRESHOLD = 0.90
 
 # =============================
 # SYNC MODEL
@@ -125,7 +131,7 @@ SYNC_PHI = 0.02
 # MIGRATION WEIGHTS
 # =============================
 INITIAL_ASSUMED_CONTROLLERS_FOR_CAP = 0.10
-CAPACITY_THRESHOLD_INITIAL=0.8
+CAPACITY_THRESHOLD_INITIAL=0.85
 
 MIG_W_MIG = 1.0
 MIG_W_DELTA = 1.0
@@ -163,7 +169,7 @@ PROPAGATION_SPEED = 200_000_000
 # =============================
 # EXPERIMENT GRID
 # =============================
-CAPACITY_THRESHOLD_mm1=0.8
+CAPACITY_THRESHOLD_mm1=0.95
 K_VALUES = [5]
 
 LINK_SENS_VALUES = [0.0]

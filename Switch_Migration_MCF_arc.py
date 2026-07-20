@@ -10,6 +10,7 @@ from link_checks import extract_mcf_solution_bundle
 from helpers import (
     CAPACITY_THRESHOLD as GLOBAL_THRESHOLD,   # usable fraction for controller capacity guard
     CAPACITY_THRESHOLD,                   # kept for reporting helpers if you want
+    OVERLOAD_THRESHOLD,
     LINK_BUDGET_BITS,
     RESULTS_FOLDER,
     FIBER_SEC_PER_KM,
@@ -722,7 +723,7 @@ def run_migration_optimizer_integrated_mcf_arc(
 
     # Capacity check for every single-controller failure case.
     # For each failed controller j, surviving controller k can receive
-    # some of j's switches until the common 90% recovery ceiling is reached.
+    # some of j's switches until the common usable-capacity ceiling is reached.
     for j in controllers:
         for k in controllers:
             if k == j:
@@ -736,7 +737,7 @@ def run_migration_optimizer_integrated_mcf_arc(
 
             m.addConstr(
                 load_expr[k] + recovered_load_j_to_k
-                <= 0.90 * float(capacities[k]),
+                <= float(CAPACITY_THRESHOLD) * float(capacities[k]),
                 name=f"backup_cap_fail_{j}_to_{k}"
             )
 
@@ -1193,7 +1194,8 @@ def run_migration_optimizer_integrated_mcf_arc(
             controllers=controllers,
             loads=loads,
             capacities=capacities,
-            usable_threshold=0.90,
+            usable_threshold=float(CAPACITY_THRESHOLD),
+            overload_threshold=float(OVERLOAD_THRESHOLD),
 
             # The normal state after load balancing
             initial_assignment=final_assign,

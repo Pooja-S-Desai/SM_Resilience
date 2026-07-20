@@ -76,6 +76,7 @@ from helpers import (
 
     # ---- Capacity / Queue ----
     CAPACITY_THRESHOLD,
+    OVERLOAD_THRESHOLD,
 
     # ---- Routing ----
     ROUTING_MODE,
@@ -185,6 +186,7 @@ def _assert_dict(name, obj):
 RUN_BASELINE1 = True   # set False to skip
 RUN_BASELINE2 = True
 RUN_BASELINE3 = True
+RUN_SHORTEST_RESILIENT = True
 # =========================================================================================================================================
 # Main Function
 # =========================================================================================================================================
@@ -192,7 +194,7 @@ RUN_BASELINE3 = True
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--runs", type=int, default=5)
+    ap.add_argument("--runs", type=int, default=helpers._NUM_RUNS)
     ap.add_argument("--topo-count", type=int, default=10, help="number of topologies to run from the list (start at smallest)")
     ap.add_argument("--topo-idx", type=int, default=0, dest="topo_idx", help="0-based index into the topology list file")
     ap.add_argument("--master-seed", type=int, default=helpers._MASTER_SEED, help="master seed for reproducibility")
@@ -781,6 +783,65 @@ def main():
                                 fh, indent=2)
 
 # ==========================================================================================================================
+                    # ===========Shortest-path load balancing + resilience==============
+# ============================================================================================================================
+
+                    if RUN_SHORTEST_RESILIENT:
+                        current_algo = "SHORTEST_RESILIENT"
+                        print(f"🚀 ENTERING SHORTEST RESILIENT | run={RUN_INDEX}")
+                        (
+                            fa_shortest_res,
+                            fl_shortest_res,
+                            paths_shortest_res,
+                            obj_shortest_res,
+                            mig_shortest_res,
+                            mip_shortest_res,
+                            status_shortest_res,
+                        ) = run_migration_optimizer(
+                            G=G_run,
+                            switches=switches,
+                            controllers=controllers,
+                            dij=dij,
+                            init_assign=init_assign_cs,
+                            loads=loads,
+                            capacities=capacities,
+                            topology_name=topo_name,
+                            objective_type=Objective,
+                            Dcc=Dcc,
+                            sync_per_ctrl_ms=SYNC_DELAY_MS,
+                            edge_caps_e=edge_caps,
+                            msg_bits=MSG_BITS_PER_REQ,
+                            cost_mode=ROUTING_MODE,
+                            alpha=alpha,
+                            beta=beta,
+                            gamma_res=1.0,
+                            run_index=RUN_INDEX,
+                            plot_recovery=True,
+                            plot_pos=pos,
+                            plot_save_dir=ALG_DIR("SHORTEST_RESILIENT"),
+                            master_seed=args.master_seed,
+                            switch_seed=SEEDS["loads"],
+                            run_number=RUN_INDEX + 1,
+                            comparison_csv_file=RECOVERY_COMPARISON_CSV,
+                        )
+                        status_shortest_res = str(status_shortest_res)
+                        if not fa_shortest_res:
+                            log_failure(
+                                "SHORTEST_RESILIENT", status_shortest_res,
+                                RUN_INDEX, topo_name, G_run, alpha, beta,
+                                k_path_count, sens,
+                            )
+                        else:
+                            plot_assignments(
+                                G_run, pos, switches, controllers,
+                                init_assign_cs, fa_shortest_res,
+                                loads, fl_shortest_res,
+                                topo_name, ALG_DIR("SHORTEST_RESILIENT"), capacities,
+                                extra_title=f"Shortest resilient objective={Objective}",
+                                file_tag=f"SHORTEST_RESILIENT_run{RUN_INDEX:03d}_topo{idx:02d}",
+                            )
+
+# ==========================================================================================================================
                         # ===========Multi-commodity Flow-ARC==============
 # ============================================================================================================================                        
 
@@ -857,12 +918,18 @@ def main():
                     )
                     if arc_failed:
                         log_failure("MCF_ARC", status_arc, RUN_INDEX, topo_name, G_run, alpha, beta, k_path_count, sens)
+                        # All baselines use the MCF-ARC assignment as their
+                        # common starting point.  Do not continue with an
+                        # absent/failed assignment (or stale metrics left from
+                        # the preceding run).
+                        continue
                     elif missing_fa_mcf_arc:
                         log_failure(
                             "MCF_ARC",
                             f"INCOMPLETE_ASSIGNMENT_MCF_ARC_MISSING_{len(missing_fa_mcf_arc)}",
                             RUN_INDEX, topo_name, G_run, alpha, beta, k_path_count, sens
                         )
+                        continue
                     else:    
                         paths_mcf_arc = {
                             s: paths_by_switch_final_arc.get((s, fa_mcf_arc[s]), [])
@@ -1185,6 +1252,31 @@ def main():
                             controller_sens=0.0,
                         )
 
+                        # Every recovery baseline starts from exactly the same
+                        # post-balancing MCF-ARC snapshot.  Rebind the common
+                        # "init" evaluation variables here so baseline metrics,
+                        # plots and CSV logs cannot accidentally refer back to
+                        # the controller-selection assignment.
+                        init_assign_cs = dict(fa_mcf_arc)
+                        init_loads_by_ctrl = dict(fl_mcf_arc)
+                        init_dev = (
+                            max(fl_mcf_arc.values()) - min(fl_mcf_arc.values())
+                            if fl_mcf_arc else 0.0
+                        )
+                        init_rt = rt_mcf_std_arc
+                        init_mean_rt = rt_mean_ms_mcf_arc
+                        init_mean_ms_rt = rt_mean_ms_mcf_arc
+                        rt_max_ms_init = rt_max_ms_mcf_arc
+                        rt_p95_ms_init = rt_p95_ms_mcf_arc
+                        lb_init = lb_mcf_arc
+                        lam_init = dict(fl_mcf_arc)
+                        T_init = dict(rt_mcf_std_arc["T_final_ms_by_switch"])
+                        prop_init = dict(rt_mcf_std_arc["prop_by_switch"])
+                        W_init = dict(rt_mcf_std_arc["Wsys_by_ctrl"])
+                        chosen_paths_init = dict(paths_mcf_arc)
+                        usage_init_routed = dict(usage_mcf_arc)
+                        link_sum_init = summarize_link_usage(usage_mcf_arc, edge_caps)
+
 # ==========================================================================================================================
                         # ===========BASELINE-1: optimization-only (load-based objective)==============
 # ============================================================================================================================                  
@@ -1235,7 +1327,8 @@ def main():
                                 capacities=capacities,
                                 dij=dij,
                                 Dcc=Dcc,
-                                usable_threshold=0.90,
+                                usable_threshold=CAPACITY_THRESHOLD,
+                                overload_threshold=OVERLOAD_THRESHOLD,
                                 rule_install_cost=0.10,
                                 omega=controllers,
                                 time_limit=300,
@@ -1591,8 +1684,8 @@ def main():
                             dij=dij,
                             paths_sc=paths,
                             msg_bits=MSG_BITS_PER_REQ,
-                            usable_threshold=0.90,
-                            overload_threshold=0.90,
+                            usable_threshold=CAPACITY_THRESHOLD,
+                            overload_threshold=OVERLOAD_THRESHOLD,
                             alpha=0.5,
                             gamma=0.8,
                             population_size=50,
@@ -1962,10 +2055,10 @@ def main():
                             dij=dij,
                             paths_sc=paths,
                             msg_bits=MSG_BITS_PER_REQ,
-                            usable_threshold=0.90,
-                            overload_threshold=0.90,
+                            usable_threshold=CAPACITY_THRESHOLD,
+                            overload_threshold=OVERLOAD_THRESHOLD,
                             population_size=50,
-                            generations=150,
+                            generations=50,
                             mutation_rate=0.40,
                             enforce_capacity=True,
                             output_dir=ALG_DIR("FLCF_GA_2016"),

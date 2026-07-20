@@ -3,7 +3,7 @@ import os
 import math
 import gurobipy as gp
 from gurobipy import GRB, quicksum
-from helpers import ( CAPACITY_THRESHOLD, INITIAL_ASSUMED_CONTROLLERS_FOR_CAP,
+from helpers import ( CAPACITY_THRESHOLD, OVERLOAD_THRESHOLD, INITIAL_ASSUMED_CONTROLLERS_FOR_CAP,
     MAX_LOAD, CAPACITY_THRESHOLD_INITIAL,MIN_LOAD,HOT_UTIL_RANGE,NORMAL_UTIL_RANGE
 )
 import random
@@ -11,13 +11,15 @@ import random, numpy as np
 from iis_logger import write_iis_with_context
 CONTROLLER_FAILURE_FOLDER = "./controller_selection_failure"
 os.makedirs(CONTROLLER_FAILURE_FOLDER, exist_ok=True)
-MCF_RHO_MAX_FOR_INIT = 0.95
+# CAPACITY_THRESHOLD_INITIAL is the complete initial-placement usable fraction.
+# Do not multiply it by a second utilization factor when sizing the pivot.
+MCF_RHO_MAX_FOR_INIT = 1.0
 
 
 def _build_feasible_imbalanced_fallback(G, loads, estimated_k, pivot_capacity):
     """
-    Deterministic backup for experiments: always returns a complete initial
-    placement with at least one controller above CAPACITY_THRESHOLD utilization.
+    Deterministic backup for experiments: returns a complete initial placement
+    with at least one controller above OVERLOAD_THRESHOLD utilization.
     """
     nodes = sorted(G.nodes())
     controllers = nodes[:min(estimated_k, len(nodes))]
@@ -35,10 +37,10 @@ def _build_feasible_imbalanced_fallback(G, loads, estimated_k, pivot_capacity):
 
     remaining = [s for s in nodes if s not in assignment]
 
-    # Pack the hottest controller just above the threshold. Its capacity is
-    # then chosen from its assigned load, so it is overloaded but not >100%.
+    # Give the hottest controller a larger share while retaining enough raw
+    # capacity for the configured initial usable-capacity limit.
     target_hot_load = max(
-        CAPACITY_THRESHOLD * float(pivot_capacity) + 1.0,
+        OVERLOAD_THRESHOLD * float(pivot_capacity) + 1.0,
         float(loads.get(hot, 0.0)),
     )
     for s in sorted(remaining, key=lambda x: float(loads.get(x, 0.0)), reverse=True):
@@ -88,12 +90,21 @@ def _build_feasible_imbalanced_fallback(G, loads, estimated_k, pivot_capacity):
 
     overloaded = [
         c for c in controllers
-        if ctrl_loads[c] > CAPACITY_THRESHOLD * capacities[c]
+        if ctrl_loads[c] > OVERLOAD_THRESHOLD * capacities[c]
     ]
     if not overloaded:
         load_hot = max(ctrl_loads[hot], 1.0)
-        capacities[hot] = max(1.0, math.ceil(load_hot / 0.85))
+        target_util = min(0.95, OVERLOAD_THRESHOLD + 0.01)
+        capacities[hot] = max(1.0, load_hot / target_util)
         overloaded = [hot]
+
+    # Creating the deliberate >90% hot controller must not break the
+    # aggregate 85%-sizing reserve. Put any deficit on another controller.
+    usable_total = sum(effective_threshold * capacities[c] for c in controllers)
+    if usable_total < total_load:
+        reserve_controller = next((c for c in reversed(controllers) if c != hot), hot)
+        deficit = total_load - usable_total
+        capacities[reserve_controller] += math.ceil(deficit / effective_threshold) + 1
 
     print(f"🛟 FALLBACK controller selection used; overloaded controllers: {overloaded}")
     return len(controllers), controllers, capacities, assignment, {} , "OPTIMAL"
@@ -218,7 +229,12 @@ def get_min_controllers_and_assignment(
 
     for v in G.nodes():
         m.addConstr(
-            quicksum(loads[u] * x2[u, v] for u in G.nodes()) <= node_capacities[v] * x1[v],
+            quicksum(loads[u] * x2[u, v] for u in G.nodes())
+            <= (
+                CAPACITY_THRESHOLD
+                * node_capacities[v]
+                * x1[v]
+            ),
             name=f"capacity_limit_{v}"
         )
         m.addConstr(quicksum(x2[u, v] for u in G.nodes()) >= x1[v], name=f"min_load_{v}")
@@ -234,9 +250,9 @@ def get_min_controllers_and_assignment(
 
     for v in G.nodes():
         load_on_v = gp.quicksum(loads[u] * x2[u, v] for u in G.nodes())
-        m.addConstr((overloaded[v] == 0) >> (load_on_v <= CAPACITY_THRESHOLD * node_capacities[v]),
+        m.addConstr((overloaded[v] == 0) >> (load_on_v <= OVERLOAD_THRESHOLD * node_capacities[v]),
                     name=f"no_overload_{v}")
-        m.addConstr((overloaded[v] == 1) >> (load_on_v >= CAPACITY_THRESHOLD * node_capacities[v] + 1e-3),
+        m.addConstr((overloaded[v] == 1) >> (load_on_v >= OVERLOAD_THRESHOLD * node_capacities[v] + 1e-3),
                     name=f"overload_{v}")
         m.addConstr(overloaded[v] <= x1[v], name=f"non_controller_not_overloaded_{v}")
 
@@ -248,11 +264,11 @@ def get_min_controllers_and_assignment(
         name="total_capacity_satisfies_total_load"
     )
 
-    min_overloaded_ctrls = 1
     m.addConstr(
-        gp.quicksum(overloaded[v] for v in G.nodes()) >= min_overloaded_ctrls,
-        name="at_least_one_selected_controller_above_80pct"
+        gp.quicksum(overloaded[v] for v in G.nodes()) >= 1,
+        name="at_least_one_selected_controller_above_overload_threshold"
     )
+
     for v in G.nodes():
         m.addConstr(x2[v, v] >= x1[v], name=f"controller_serves_itself_{v}")
 
@@ -278,12 +294,12 @@ def get_min_controllers_and_assignment(
         }
         overloaded_selected = [
             v for v in selected
-            if selected_loads[v] > CAPACITY_THRESHOLD * assigned_capacities[v]
+            if selected_loads[v] > OVERLOAD_THRESHOLD * assigned_capacities[v]
         ]
 
         if selected and initial_assignment:
             print(f"✔ SUCCESS: Initial assignment successful for {topology_name}")
-            print(f"⚖️ Initial overloaded controllers (>{CAPACITY_THRESHOLD:.0%}): {overloaded_selected}")
+            print(f"⚖️ Initial overloaded controllers (>{OVERLOAD_THRESHOLD:.0%}): {overloaded_selected}")
             return min_controllers, selected, assigned_capacities, initial_assignment, node_capacities, "OPTIMAL"
         else:
             print(f"❌ Initial assignment failed for {topology_name}")
