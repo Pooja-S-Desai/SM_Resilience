@@ -221,6 +221,34 @@ def run_flcf_single_failure(
         s: c for s, c in final_assign.items() if c != failed_controller
     }
 
+    # Quick feasibility check: ensure surviving controllers have enough
+    # raw capacity to absorb orphan load when hard capacity enforcement is
+    # expected for FLCF_GA_2016.
+    total_survivor_capacity = sum(
+        float(capacities.get(c, 0.0)) for c in survivors
+    )
+    total_orphan_load = sum(float(loads.get(s, 0.0)) for s in failed_switches)
+    if total_orphan_load > total_survivor_capacity + TOL:
+        recovery_assign = dict(final_assign)
+        recovery_loads = compute_controller_loads(recovery_assign, survivors, loads)
+        return {
+            "failed_controller": failed_controller,
+            "status": "CAPACITY_VIOLATED",
+            "failed_switches": failed_switches,
+            "surviving_controllers": survivors,
+            "recovery_plan": {},
+            "recovery_assign": recovery_assign,
+            "recovery_loads": recovery_loads,
+            "average_delay": float("inf"),
+            "sigma": float("inf"),
+            "objective": float("inf"),
+            "fitness_with_penalty": float("inf"),
+            "reassignment_cost": 0,
+            "capacity_violation": float(total_orphan_load - total_survivor_capacity),
+            "population_size": 0,
+            "subset_size": 0,
+        }
+
     def decode(chromosome: Mapping[int, int]) -> Dict[int, int]:
         recovered = dict(fixed_assign)
         recovered.update({int(s): int(c) for s, c in chromosome.items()})
@@ -239,6 +267,27 @@ def run_flcf_single_failure(
     }
 
     def make_chromosome() -> Dict[int, int]:
+        if enforce_capacity:
+            remaining_capacity = {
+                c: float(capacities.get(c, 0.0))
+                - float(compute_controller_loads(final_assign, survivors, loads).get(c, 0.0))
+                for c in survivors
+            }
+            for _ in range(10):
+                candidate: Dict[int, int] = {}
+                temp_capacity = dict(remaining_capacity)
+                for switch in sorted(failed_switches, key=lambda s: -loads.get(s, 0.0)):
+                    feasible_controllers = [
+                        c for c in survivors
+                        if temp_capacity.get(c, 0.0) + TOL >= float(loads.get(switch, 0.0))
+                    ]
+                    if not feasible_controllers:
+                        break
+                    chosen = rng.choice(feasible_controllers)
+                    candidate[switch] = chosen
+                    temp_capacity[chosen] -= float(loads.get(switch, 0.0))
+                if len(candidate) == len(failed_switches):
+                    return candidate
         return {s: rng.choice(survivors) for s in failed_switches}
 
     def chromosome_metrics(chromosome: Mapping[int, int]) -> Tuple[float, float]:
@@ -259,7 +308,7 @@ def run_flcf_single_failure(
             max(
                 0.0,
                 controller_loads[c]
-                - float(usable_threshold) * float(capacities.get(c, 0.0)),
+                - float(capacities.get(c, 0.0)),
             )
             for c in survivors
         )
@@ -280,7 +329,9 @@ def run_flcf_single_failure(
             )
             cap_violation = capacity_violation(chromosome)
             fitness = objective
-            if enforce_capacity:
+            if enforce_capacity and cap_violation > 0.0:
+                fitness = float("inf")
+            elif enforce_capacity:
                 fitness += float(capacity_penalty) * cap_violation
             evaluated.append(
                 {
@@ -457,7 +508,7 @@ def run_flcf_single_failure(
     cap_violation = capacity_violation(best_chromosome)
 
     status = "SUCCESS"
-    if enforce_capacity and cap_violation > 1e-9:
+    if cap_violation > 1e-9:
         status = "CAPACITY_VIOLATED"
 
     return {
