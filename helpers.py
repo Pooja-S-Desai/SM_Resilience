@@ -16,7 +16,7 @@ import hashlib
 # =========================================================================================================
 
 _MASTER_SEED = 40
-_NUM_RUNS    = 50
+_NUM_RUNS    = 25
 
 _seed_rng = random.Random(_MASTER_SEED)
 # sample() guarantees that every configured run gets a distinct canonical seed.

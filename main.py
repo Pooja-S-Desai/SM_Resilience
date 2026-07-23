@@ -1322,7 +1322,7 @@ def main():
                                 G=G_run,
                                 switches=switches,
                                 controllers=controllers,
-                                init_assign=fa_mcf_arc,   # important
+                                init_assign=init_assign_cs,   # important
                                 loads=loads,
                                 capacities=capacities,
                                 dij=dij,
@@ -1680,7 +1680,7 @@ def main():
                             loads=loads,
                             capacities=capacities,
                             # All baselines start from the same balanced MCF-ARC snapshot.
-                            init_assign=fa_mcf_arc,
+                            init_assign=init_assign_cs,
                             dij=dij,
                             paths_sc=paths,
                             msg_bits=MSG_BITS_PER_REQ,
@@ -2051,7 +2051,7 @@ def main():
                             controllers=controllers,
                             loads=loads,
                             capacities=capacities,
-                            init_assign=fa_mcf_arc,
+                            init_assign=init_assign_cs,
                             dij=dij,
                             paths_sc=paths,
                             msg_bits=MSG_BITS_PER_REQ,
