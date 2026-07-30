@@ -92,10 +92,11 @@ CONTROL_SHARE = 0.10
 # CAPACITY / QUEUE MODEL
 # =============================
 
-# Controllers may carry load up to 95% of their raw capacity.  Overload
-# reporting is deliberately stricter: anything above 90% is flagged.
+# Controllers may carry load up to 95% of their raw capacity where a model
+# explicitly uses the general usable-capacity limit.  For experiment reporting
+# and recovery logic, anything above 80% is overloaded.
 CAPACITY_THRESHOLD = 0.95
-OVERLOAD_THRESHOLD = 0.90
+OVERLOAD_THRESHOLD = 0.80
 
 # =============================
 # SYNC MODEL
@@ -131,7 +132,7 @@ SYNC_PHI = 0.02
 # MIGRATION WEIGHTS
 # =============================
 INITIAL_ASSUMED_CONTROLLERS_FOR_CAP = 0.10
-CAPACITY_THRESHOLD_INITIAL=0.85
+CAPACITY_THRESHOLD_INITIAL = 0.80
 
 MIG_W_MIG = 1.0
 MIG_W_DELTA = 1.0

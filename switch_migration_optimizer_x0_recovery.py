@@ -14,10 +14,11 @@ from helpers import (
 )
 from rt_metrics import build_paths_sc_from_switch_paths, path_latency_ms
 from failure_scenario_handler import process_failure_scenario
+from plotting import plot_final_vs_recovery_assignment
 os.makedirs(RESULTS_FOLDER, exist_ok=True)
 
 
-def run_migration_optimizer(
+def run_migration_optimizer_x0_recovery(
     G,
     switches,
     controllers,
@@ -75,7 +76,7 @@ def run_migration_optimizer(
       - "min_dev"        : Minimize L1 deviation from mean utilization
       - "maxmin"         : Minimize (Lmax - Lmin) over controller loads
     """
-    model = gp.Model("switch_migration")
+    model = gp.Model("switch_migration_x0_recovery")
     model.setParam('OutputFlag', 0)
     model.setParam("Time_Limit", float(TIME_LIMIT))
 
@@ -143,8 +144,6 @@ def run_migration_optimizer(
     cc_transfer    = gp.quicksum(dcc_pair[(s, c)] * y[s, c] for s in switches for c in controllers)
     steiner_bcast  = float(sync_per_ctrl_ms) * num_migrations
 
-    # Same response-time increase used by the MCF optimizers:
-    # round-trip propagation + M/M/1 controller time + synchronization.
     rho_max = 0.95
     pwl_segments = 20
     lam_rt = model.addVars(controllers, lb=0.0, name="lambda_rt")
@@ -171,14 +170,8 @@ def run_migration_optimizer(
     for s in switches:
         for c in controllers:
             candidate = propagation_ms[s, c] + W_ms[c] + float(sync_per_ctrl_ms)
-            model.addConstr(
-                T_ms[s] - candidate <= big_m_rt * (1 - y[s, c]),
-                name=f"T_up_{s}_{c}",
-            )
-            model.addConstr(
-                candidate - T_ms[s] <= big_m_rt * (1 - y[s, c]),
-                name=f"T_lo_{s}_{c}",
-            )
+            model.addConstr(T_ms[s] - candidate <= big_m_rt * (1 - y[s, c]))
+            model.addConstr(candidate - T_ms[s] <= big_m_rt * (1 - y[s, c]))
 
     mean_T_ms = model.addVar(lb=0.0, name="mean_T_ms")
     model.addConstr(
@@ -249,6 +242,8 @@ def run_migration_optimizer(
         raise ValueError(f"Unknown objective_type: {objective_type}")
 
     # ---------- Proactive single-controller-failure recovery ----------
+    # ABLATION: this recovery plan is tied to x0 (the pre-migration assignment).
+    # It is intentionally used to measure the consequence of replacing y by x0.
     # Keep the shortest-path load-balancing model above unchanged and add the
     # same recovery decisions used by MCF-ARC.
     backup_pairs = [
@@ -275,12 +270,19 @@ def run_migration_optimizer(
         residual_location_pairs, vtype=GRB.BINARY, name="residual_at"
     )
 
+    # Experimental x0-coupled recovery variant.
+    # Recovery is planned for the INITIAL assignment x0, not optimized assignment y.
+    initial_load_const = {
+        c: sum(float(loads[s]) * x0[(s, c)] for s in switches)
+        for c in controllers
+    }
+
     for s in switches:
         for failed in controllers:
             model.addConstr(
                 gp.quicksum(bkp[s, failed, target] for target in controllers if target != failed)
                 + residual[s, failed]
-                == y[s, failed],
+                == x0[(s, failed)],
                 name=f"backup_or_residual_{s}_{failed}",
             )
 
@@ -310,7 +312,7 @@ def run_migration_optimizer(
                 float(loads[s]) * bkp[s, failed, target] for s in switches
             )
             model.addConstr(
-                load_expr[target] + recovered
+                initial_load_const[target] + recovered
                 <= GLOBAL_THRESHOLD * float(capacities[target]),
                 name=f"backup_cap_fail_{failed}_to_{target}",
             )
@@ -331,7 +333,7 @@ def run_migration_optimizer(
             recovered = gp.quicksum(
                 float(loads[s]) * bkp[s, failed, target] for s in switches
             )
-            post_load = load_expr[target] + recovered
+            post_load = initial_load_const[target] + recovered
             model.addConstr(post_load <= postfail_lmax[failed])
             model.addConstr(post_load >= postfail_lmin[failed])
         if residual_candidates:
@@ -413,16 +415,16 @@ def run_migration_optimizer(
 
             iis_path = os.path.join(
                 iis_dir,
-                f"{topology_name or 'topo'}_sp_optimizer.iis"
+                f"{topology_name or 'topo'}_sp_x0_recovery_optimizer.iis"
             )
             model.write(iis_path)
 
             print("IIS written to:", iis_path)
-            status_msg = f"INFEASIBLE_SP (IIS:{iis_path})"
+            status_msg = f"INFEASIBLE_SP_X0_RECOVERY (IIS:{iis_path})"
 
         except Exception as e:
             print("IIS failed:", e)
-            status_msg = "INFEASIBLE_SP (IIS_FAILED)"
+            status_msg = "INFEASIBLE_SP_X0_RECOVERY (IIS_FAILED)"
 
         return (
             {},
@@ -445,7 +447,7 @@ def run_migration_optimizer(
             None,
             0,
             None,
-            "INF_OR_UNBOUNDED_SP"
+            "INF_OR_UNBOUNDED_SP_X0_RECOVERY"
         )
 
     # -----------------------------
@@ -459,7 +461,7 @@ def run_migration_optimizer(
             None,
             0,
             None,
-            "TIME_LIMIT_NO_SOLUTION_SP"
+            "TIME_LIMIT_NO_SOLUTION_SP_X0_RECOVERY"
         )
 
     # -----------------------------
@@ -473,7 +475,7 @@ def run_migration_optimizer(
             None,
             0,
             None,
-            f"NO_FEASIBLE_SOLUTION_STATUS_{model.Status}_SP"
+            f"NO_FEASIBLE_SOLUTION_STATUS_{model.Status}_SP_X0_RECOVERY"
         )
 
     # -----------------------------
@@ -526,13 +528,13 @@ def run_migration_optimizer(
         if variable.X > 0.5
     }
 
-    output_root = plot_save_dir or os.path.join(RESULTS_FOLDER, "SHORTEST_RESILIENT")
+    output_root = plot_save_dir or os.path.join(RESULTS_FOLDER, "SHORTEST_X0_RESILIENT")
     for failed in controllers:
         failed = int(failed)
-        recovery_assignment = dict(final_assign)
+        recovery_assignment = dict(init_assign)
         residual_by_switch = {}
         orphan_switches = [
-            int(s) for s in switches if int(final_assign.get(s, -1)) == failed
+            int(s) for s in switches if int(init_assign.get(s, -1)) == failed
         ]
         residual_controller = selected_residual_controller.get(failed)
 
@@ -562,7 +564,7 @@ def run_migration_optimizer(
             )
 
         process_failure_scenario(
-            algorithm="SHORTEST_RESILIENT",
+            algorithm="SHORTEST_X0_RESILIENT",
             topology_name=topology_name or "topology",
             run_index=run_index,
             failed_controller=failed,
@@ -574,7 +576,7 @@ def run_migration_optimizer(
             capacities=capacities,
             usable_threshold=float(GLOBAL_THRESHOLD),
             overload_threshold=float(OVERLOAD_THRESHOLD),
-            initial_assignment=final_assign,
+            initial_assignment=init_assign,
             recovery_assignment=recovery_assignment,
             fractional_assignment={},
             residual_by_switch=residual_by_switch,
@@ -587,7 +589,8 @@ def run_migration_optimizer(
             output_root=output_root,
             comparison_csv_file=comparison_csv_file,
             make_plot=plot_recovery,
-            file_tag=f"SHORTEST_RESILIENT_run{run_index:03d}_failC{failed}",
+            file_tag=f"SHORTEST_X0_RESILIENT_run{run_index:03d}_failC{failed}",
+            plot_left_title="Initial Association",
             master_seed=master_seed,
             switch_seed=switch_seed,
             run_number=run_number,
@@ -597,5 +600,56 @@ def run_migration_optimizer(
             msg_bits=msg_bits,
             link_utilization_threshold=0.90,
         )
+
+        # X0 recovery is planned from the initial assignment, so the common
+        # handler above produces Initial vs Post-Recovery.  Also retain the
+        # optimized final assignment as a separate comparison, as requested.
+        if plot_recovery and plot_pos is not None:
+            recovery_loads = {
+                int(c): 0.0
+                for c in set(controllers) | set(recovery_assignment.values())
+                if int(c) != failed
+            }
+            for s, c in recovery_assignment.items():
+                if int(c) != failed:
+                    recovery_loads[int(c)] = (
+                        recovery_loads.get(int(c), 0.0) + float(loads[s])
+                    )
+
+            plot_controllers = [int(c) for c in controllers]
+            plot_capacities = {int(c): float(v) for c, v in capacities.items()}
+            if residual_controller is not None:
+                if residual_controller not in plot_controllers:
+                    plot_controllers.append(residual_controller)
+                if backup_capacity is not None:
+                    plot_capacities[residual_controller] = float(backup_capacity)
+
+            plot_final_vs_recovery_assignment(
+                G=G,
+                pos=plot_pos,
+                switches=switches,
+                controllers=plot_controllers,
+                final_assign=final_assign,
+                recovery_assign=recovery_assignment,
+                loads=loads,
+                final_loads=final_loads,
+                recovery_loads=recovery_loads,
+                topology_name=topology_name or "topology",
+                save_dir=os.path.join(output_root, "failure_plots"),
+                controller_capacity=plot_capacities,
+                failed_controller=failed,
+                backup_controller=residual_controller,
+                backup_capacity=backup_capacity,
+                migration_count=sum(
+                    1 for s in switches
+                    if final_assign.get(s) != recovery_assignment.get(s)
+                ),
+                capacity_threshold=float(OVERLOAD_THRESHOLD),
+                file_tag=(
+                    f"SHORTEST_X0_RESILIENT_run{run_index:03d}"
+                    "_final_vs_recovery"
+                ),
+                left_panel_title="Final Association",
+            )
 
     return final_assign, final_loads, paths_sc,obj_val, migration_count, mip_gap_solved,status_msg

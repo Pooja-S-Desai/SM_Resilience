@@ -17,7 +17,13 @@ from collections import defaultdict
 
 from adjustText import adjust_text
 
-from helpers import TOPOLOGY_FOLDER, TOPOLOGY_LIST_FILE, PROPAGATION_SPEED, ensure_dir, CAPACITY_THRESHOLD as delta
+from helpers import (
+    TOPOLOGY_FOLDER,
+    TOPOLOGY_LIST_FILE,
+    PROPAGATION_SPEED,
+    ensure_dir,
+    OVERLOAD_THRESHOLD as delta,
+)
 
 
 # -------------------------------------------------------------
@@ -422,6 +428,7 @@ def plot_final_vs_recovery_assignment(
     migration_count=None,
     capacity_threshold=delta,
     integer_load_labels=False,
+    left_panel_title="Final Association",
 ):
     os.makedirs(save_dir, exist_ok=True)
 
@@ -704,7 +711,7 @@ def plot_final_vs_recovery_assignment(
     draw_one(ax1, final_assign, final_loads, original_controllers, is_recovery=False)
     draw_one(ax2, recovery_assign, recovery_loads, active_recovery_controllers, is_recovery=True)
 
-    ax1.set_title(f"Final Association\nLoad Dev: {load_dev_final}", fontsize=20)
+    ax1.set_title(f"{left_panel_title}\nLoad Dev: {load_dev_final}", fontsize=20)
     ax2.set_title(
         f"Planned Recovery Association Failure of C{failed_controller}\n"
         f"Load Dev: {load_dev_recovery}",

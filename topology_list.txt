@@ -1,8 +1,3 @@
 AttMpls
 CrlNetworkServices
-Xspedius
-Geant2010
-Palmetto
-Bellcanada
 Iris
-Uninett2010

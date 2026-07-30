@@ -7,9 +7,16 @@ from steiner_opt import run_steiner_constant_penalty
 
 # Use your helpers' RESULTS_FOLDER + ensure_dir; fall back if helpers missing.
 try:
-    from helpers import RESULTS_FOLDER, ensure_dir
+    from helpers import (
+        CAPACITY_THRESHOLD_INITIAL,
+        OVERLOAD_THRESHOLD,
+        RESULTS_FOLDER,
+        ensure_dir,
+    )
 except Exception:
     RESULTS_FOLDER = "./results"
+    CAPACITY_THRESHOLD_INITIAL = 0.80
+    OVERLOAD_THRESHOLD = 0.80
     def ensure_dir(p: str): os.makedirs(p, exist_ok=True)
 
 def compute_or_load_init_only(
@@ -49,6 +56,8 @@ def compute_or_load_init_only(
         "master_seed": int(master_seed),
         "seeds": {k: int(v) for k, v in (seeds or {}).items()},
         "cost_mode": str(cost_mode),
+        "capacity_threshold_initial": float(CAPACITY_THRESHOLD_INITIAL),
+        "overload_threshold": float(OVERLOAD_THRESHOLD),
     }
     keyhash = hashlib.blake2b(
         json.dumps(key, sort_keys=True).encode(), digest_size=16

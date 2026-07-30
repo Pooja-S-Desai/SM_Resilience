@@ -42,6 +42,8 @@ from switch_migration_optimizer_shortest import run_migration_optimizer
 from baseline1_FTFSM import run_baseline1_FTFSM
 from baseline2_PREF import run_baseline_pref_cp_ga_exact
 from baseline3_FLCF import run_baseline3_flcf_exact
+from switch_migration_optimizer_shortest_sequential import run_migration_optimizer_sequential
+from switch_migration_optimizer_x0_recovery import run_migration_optimizer_x0_recovery
 # Steiner / Sync
 from steiner_opt import run_steiner_constant_penalty
 
@@ -187,6 +189,8 @@ RUN_BASELINE1 = True   # set False to skip
 RUN_BASELINE2 = True
 RUN_BASELINE3 = True
 RUN_SHORTEST_RESILIENT = True
+RUN_SHORTEST_RESILIENT_SEQUENTIAL = True
+RUN_SHORTEST_X0_RESILIENT = True
 # =========================================================================================================================================
 # Main Function
 # =========================================================================================================================================
@@ -781,7 +785,90 @@ def main():
                                     "per_controller_ms": SYNC_DELAY_MS,
                                 },
                                 fh, indent=2)
+                            
 
+# ==========================================================================================================================
+# ===========Shortest-path load balancing + resilience (Sequential)==============
+# ============================================================================================================================
+
+                    if RUN_SHORTEST_RESILIENT_SEQUENTIAL:
+                        current_algo = "SHORTEST_RESILIENT_SEQUENTIAL"
+                        print(f"🚀 ENTERING SHORTEST RESILIENT SEQUENTIAL | run={RUN_INDEX}")
+
+                        (
+                            fa_shortest_seq,
+                            fl_shortest_seq,
+                            paths_shortest_seq,
+                            obj_shortest_seq,
+                            mig_shortest_seq,
+                            mip_shortest_seq,
+                            status_shortest_seq,
+                        ) = run_migration_optimizer_sequential(
+                            G=G_run,
+                            switches=switches,
+                            controllers=controllers,
+                            dij=dij,
+                            init_assign=init_assign_cs,
+                            loads=loads,
+                            capacities=capacities,
+                            topology_name=topo_name,
+                            objective_type=Objective,
+                            Dcc=Dcc,
+                            sync_per_ctrl_ms=SYNC_DELAY_MS,
+                            edge_caps_e=edge_caps,
+                            msg_bits=MSG_BITS_PER_REQ,
+                            cost_mode=ROUTING_MODE,
+                            alpha=alpha,
+                            beta=beta,
+                            gamma_res=1.0,
+                            init_mean_rt_ms=init_mean_ms_rt,
+                            run_index=RUN_INDEX,
+                            plot_recovery=True,
+                            plot_pos=pos,
+                            plot_save_dir=ALG_DIR("SHORTEST_RESILIENT_SEQUENTIAL"),
+                            master_seed=args.master_seed,
+                            switch_seed=SEEDS["loads"],
+                            run_number=RUN_INDEX + 1,
+                            comparison_csv_file=RECOVERY_COMPARISON_CSV,
+                        )
+
+                        status_shortest_seq = str(status_shortest_seq)
+
+                        if not fa_shortest_seq:
+                            log_failure(
+                                "SHORTEST_RESILIENT_SEQUENTIAL",
+                                status_shortest_seq,
+                                RUN_INDEX,
+                                topo_name,
+                                G_run,
+                                alpha,
+                                beta,
+                                k_path_count,
+                                sens,
+                            )
+
+                        else:
+                            plot_assignments(
+                                G_run,
+                                pos,
+                                switches,
+                                controllers,
+                                init_assign_cs,
+                                fa_shortest_seq,
+                                loads,
+                                fl_shortest_seq,
+                                topo_name,
+                                ALG_DIR("SHORTEST_RESILIENT_SEQUENTIAL"),
+                                capacities,
+                                extra_title=f"Shortest Sequential resilient objective={Objective}",
+                                file_tag=f"SHORTEST_RESILIENT_SEQUENTIAL_run{RUN_INDEX:03d}_topo{idx:02d}",
+                            )
+
+                            # Uncomment ONLY if you want later baselines to use the sequential
+                            # balanced assignment instead of the joint shortest-path assignment.
+                            #
+                            # init_assign_cs = dict(fa_shortest_seq)
+                            # init_loads_by_ctrl = dict(fl_shortest_seq)
 # ==========================================================================================================================
                     # ===========Shortest-path load balancing + resilience==============
 # ============================================================================================================================
@@ -815,6 +902,7 @@ def main():
                             alpha=alpha,
                             beta=beta,
                             gamma_res=1.0,
+                            init_mean_rt_ms=init_mean_ms_rt,
                             run_index=RUN_INDEX,
                             plot_recovery=True,
                             plot_pos=pos,
@@ -841,441 +929,514 @@ def main():
                                 file_tag=f"SHORTEST_RESILIENT_run{RUN_INDEX:03d}_topo{idx:02d}",
                             )
 
+                            # # Use the shortest optimizer's final switch assignment
+                            # # as the common initial snapshot for every baseline.
+                            # init_assign_cs = dict(fa_shortest_res)
+                            # init_loads_by_ctrl = dict(fl_shortest_res)
+
+
+# ========================================================================================================================
+# #==============================Trying x0 for joint===================================================================
+# ========================================================================================================================
+
+                    if RUN_SHORTEST_X0_RESILIENT:
+                        current_algo = "SHORTEST_X0_RESILIENT"
+                        print(f"🚀 ENTERING SHORTEST X0 RESILIENT | run={RUN_INDEX}")
+
+                        (
+                            fa_shortest_x0,
+                            fl_shortest_x0,
+                            paths_shortest_x0,
+                            obj_shortest_x0,
+                            mig_shortest_x0,
+                            mip_shortest_x0,
+                            status_shortest_x0,
+                        ) = run_migration_optimizer_x0_recovery(
+                            G=G_run,
+                            switches=switches,
+                            controllers=controllers,
+                            dij=dij,
+                            init_assign=init_assign_cs,
+                            loads=loads,
+                            capacities=capacities,
+                            topology_name=topo_name,
+                            objective_type=Objective,
+                            Dcc=Dcc,
+                            sync_per_ctrl_ms=SYNC_DELAY_MS,
+                            edge_caps_e=edge_caps,
+                            msg_bits=MSG_BITS_PER_REQ,
+                            cost_mode=ROUTING_MODE,
+                            alpha=alpha,
+                            beta=beta,
+                            gamma_res=1.0,
+                            init_mean_rt_ms=init_mean_ms_rt,
+                            run_index=RUN_INDEX,
+                            plot_recovery=True,
+                            plot_pos=pos,
+                            plot_save_dir=ALG_DIR("SHORTEST_X0_RESILIENT"),
+                            master_seed=args.master_seed,
+                            switch_seed=SEEDS["loads"],
+                            run_number=RUN_INDEX + 1,
+                            comparison_csv_file=RECOVERY_COMPARISON_CSV,
+                        )
+                        status_shortest_x0 = str(status_shortest_x0)
+                        if not fa_shortest_x0:
+                            log_failure(
+                                "SHORTEST_X0_RESILIENT", status_shortest_x0,
+                                RUN_INDEX, topo_name, G_run, alpha, beta,
+                                k_path_count, sens,
+                            )
+                        else:
+                            plot_assignments(
+                                G_run, pos, switches, controllers,
+                                init_assign_cs, fa_shortest_x0,
+                                loads, fl_shortest_x0,
+                                topo_name,
+                                ALG_DIR("SHORTEST_X0_RESILIENT"),
+                                capacities,
+                                extra_title=(
+                                    f"Shortest X0 resilient objective={Objective}"
+                                ),
+                                file_tag=(
+                                    f"SHORTEST_X0_RESILIENT_run{RUN_INDEX:03d}"
+                                    f"_topo{idx:02d}"
+                                ),
+                            )
 # ==========================================================================================================================
                         # ===========Multi-commodity Flow-ARC==============
 # ============================================================================================================================                        
 
-                    current_algo = "MCF_ARC"
-                    solve_start_MCF_arc = time.perf_counter()
-                    print(f"🚀 ENTERING MCF ARC | run={RUN_INDEX}")
+                    # current_algo = "MCF_ARC"
+                    # solve_start_MCF_arc = time.perf_counter()
+                    # print(f"🚀 ENTERING MCF ARC | run={RUN_INDEX}")
 
-                    (
-                        fa_mcf_arc,                  # final assignment
-                        fl_mcf_arc,                  # loads per controller
-                        obj_mcf_arc,                 # solver objective value
-                        mig_mcf_arc,                 # migration count
-                        usage_mcf_arc,               # ✅ FLOW-based link usage
-                        rt_mcf_arc_solver,           # ✅ solver RT (flow-based)
-                        mip_MCF_arc,                 # mip gap
-                        mig_cost_arc,                # migration cost breakdown
-                        paths_by_switch_final_arc,    # ✅ reconstructed paths for RT
-                        status_arc,
-                        resilience_meta_arc,
+                    # (
+                    #     fa_mcf_arc,                  # final assignment
+                    #     fl_mcf_arc,                  # loads per controller
+                    #     obj_mcf_arc,                 # solver objective value
+                    #     mig_mcf_arc,                 # migration count
+                    #     usage_mcf_arc,               # ✅ FLOW-based link usage
+                    #     rt_mcf_arc_solver,           # ✅ solver RT (flow-based)
+                    #     mip_MCF_arc,                 # mip gap
+                    #     mig_cost_arc,                # migration cost breakdown
+                    #     paths_by_switch_final_arc,    # ✅ reconstructed paths for RT
+                    #     status_arc,
+                    #     resilience_meta_arc,
                         
-                    ) = run_migration_optimizer_integrated_mcf_arc(
-                        G=G_run,
-                        switches=switches,
-                        controllers=controllers,
-                        loads=loads,
-                        capacities=capacities,
-                        init_assign=init_assign_cs,
+                    # ) = run_migration_optimizer_integrated_mcf_arc(
+                    #     G=G_run,
+                    #     switches=switches,
+                    #     controllers=controllers,
+                    #     loads=loads,
+                    #     capacities=capacities,
+                    #     init_assign=init_assign_cs,
 
-                        edge_caps_e=edge_caps,
-                        msg_bits=MSG_BITS_PER_REQ,
+                    #     edge_caps_e=edge_caps,
+                    #     msg_bits=MSG_BITS_PER_REQ,
 
-                        objective_type=Objective,
-                        topology_name=topo_name,
+                    #     objective_type=Objective,
+                    #     topology_name=topo_name,
 
-                        round_trip=True,
-                        eta=1e-6,
+                    #     round_trip=True,
+                    #     eta=1e-6,
 
-                        # migration cost
-                        Dcc=Dcc,
-                        sync_per_ctrl_ms=SYNC_DELAY_MS,
-                        cost_mode=ROUTING_MODE,
+                    #     # migration cost
+                    #     Dcc=Dcc,
+                    #     sync_per_ctrl_ms=SYNC_DELAY_MS,
+                    #     cost_mode=ROUTING_MODE,
 
-                        # RT baseline (same as PATH)
-                        init_mean_rt_ms=init_mean_ms_rt,
+                    #     # RT baseline (same as PATH)
+                    #     init_mean_rt_ms=init_mean_ms_rt,
 
-                        rho_max=0.95,
-                        pwl_segments=12,
-                        allow_path_splitting=True,
+                    #     rho_max=0.95,
+                    #     pwl_segments=12,
+                    #     allow_path_splitting=True,
 
-                        alpha=alpha,
-                        beta=beta,
-                        gamma_res=1.0,
-                        run_index=RUN_INDEX,
-                        resilience_log_dir=os.path.join(RESULTS_FOLDER, "resilience_logs"),
-                        plot_recovery=True,
-                        plot_pos=pos,
-                        plot_save_dir=ALG_DIR("MCF_ARC"),
-                        plot_topology_name=topo_name,
-                        plot_file_tag=f"MCF_ARC_run{RUN_INDEX:03d}_topo{idx:02d}",
-                        node_capacities=node_capacities,
-                        dij=dist_all,
-                        master_seed=args.master_seed,
-                        switch_seed=SEEDS["loads"],
-                        run_number=RUN_INDEX + 1,
-                        comparison_csv_file=RECOVERY_COMPARISON_CSV,
-                    )
+                    #     alpha=alpha,
+                    #     beta=beta,
+                    #     gamma_res=1.0,
+                    #     run_index=RUN_INDEX,
+                    #     resilience_log_dir=os.path.join(RESULTS_FOLDER, "resilience_logs"),
+                    #     plot_recovery=True,
+                    #     plot_pos=pos,
+                    #     plot_save_dir=ALG_DIR("MCF_ARC"),
+                    #     plot_topology_name=topo_name,
+                    #     plot_file_tag=f"MCF_ARC_run{RUN_INDEX:03d}_topo{idx:02d}",
+                    #     node_capacities=node_capacities,
+                    #     dij=dist_all,
+                    #     master_seed=args.master_seed,
+                    #     switch_seed=SEEDS["loads"],
+                    #     run_number=RUN_INDEX + 1,
+                    #     comparison_csv_file=RECOVERY_COMPARISON_CSV,
+                    # )
 
-                    solve_time_mcf_arc = time.perf_counter() - solve_start_MCF_arc
-                    status_arc = str(status_arc)
-                    missing_fa_mcf_arc = [s for s in switches if s not in (fa_mcf_arc or {})]
-                    arc_failed = (
-                        status_arc != "OPTIMAL"
-                        and not status_arc.startswith("FEASIBLE_STATUS")
-                    )
-                    if arc_failed:
-                        log_failure("MCF_ARC", status_arc, RUN_INDEX, topo_name, G_run, alpha, beta, k_path_count, sens)
-                        # All baselines use the MCF-ARC assignment as their
-                        # common starting point.  Do not continue with an
-                        # absent/failed assignment (or stale metrics left from
-                        # the preceding run).
-                        continue
-                    elif missing_fa_mcf_arc:
-                        log_failure(
-                            "MCF_ARC",
-                            f"INCOMPLETE_ASSIGNMENT_MCF_ARC_MISSING_{len(missing_fa_mcf_arc)}",
-                            RUN_INDEX, topo_name, G_run, alpha, beta, k_path_count, sens
-                        )
-                        continue
-                    else:    
-                        paths_mcf_arc = {
-                            s: paths_by_switch_final_arc.get((s, fa_mcf_arc[s]), [])
-                            for s in switches
-                        }
-                        # paths_mcf_arc_sc = {
-                        #     (s, fa_mcf_arc[s]): paths_by_switch_final_arc.get((s, fa_mcf_arc[s]), [])
-                        #     for s in switches
-                        # }
-                        # =========================
-                        # STANDARD RT (UNIFORM)
-                        # =========================
-                        rt_mcf_std_arc = compute_response_metrics(
-                            G_run,
-                            fa_mcf_arc,
-                            loads,
-                            capacities,
-                            paths_by_switch_final_arc,   # must come from ARC extractor
-                            round_trip=True,
-                            per_ctrl_ms=SYNC_DELAY_MS,
-                        )
+                    # solve_time_mcf_arc = time.perf_counter() - solve_start_MCF_arc
+                    # status_arc = str(status_arc)
+                    # missing_fa_mcf_arc = [s for s in switches if s not in (fa_mcf_arc or {})]
+                    # arc_failed = (
+                    #     status_arc != "OPTIMAL"
+                    #     and not status_arc.startswith("FEASIBLE_STATUS")
+                    # )
+                    # if arc_failed:
+                    #     log_failure("MCF_ARC", status_arc, RUN_INDEX, topo_name, G_run, alpha, beta, k_path_count, sens)
+                    #     # All baselines use the MCF-ARC assignment as their
+                    #     # common starting point.  Do not continue with an
+                    #     # absent/failed assignment (or stale metrics left from
+                    #     # the preceding run).
+                    #     continue
+                    # elif missing_fa_mcf_arc:
+                    #     log_failure(
+                    #         "MCF_ARC",
+                    #         f"INCOMPLETE_ASSIGNMENT_MCF_ARC_MISSING_{len(missing_fa_mcf_arc)}",
+                    #         RUN_INDEX, topo_name, G_run, alpha, beta, k_path_count, sens
+                    #     )
+                    #     continue
+                    # else:    
+                    #     paths_mcf_arc = {
+                    #         s: paths_by_switch_final_arc.get((s, fa_mcf_arc[s]), [])
+                    #         for s in switches
+                    #     }
+                    #     # paths_mcf_arc_sc = {
+                    #     #     (s, fa_mcf_arc[s]): paths_by_switch_final_arc.get((s, fa_mcf_arc[s]), [])
+                    #     #     for s in switches
+                    #     # }
+                    #     # =========================
+                    #     # STANDARD RT (UNIFORM)
+                    #     # =========================
+                    #     rt_mcf_std_arc = compute_response_metrics(
+                    #         G_run,
+                    #         fa_mcf_arc,
+                    #         loads,
+                    #         capacities,
+                    #         paths_by_switch_final_arc,   # must come from ARC extractor
+                    #         round_trip=True,
+                    #         per_ctrl_ms=SYNC_DELAY_MS,
+                    #     )
 
-                        # =========================
-                        # FLOW RT (SOLVER)
-                        # =========================
-                        rt_mcf_flow_arc = rt_mcf_arc_solver or {}
-                        T_flow_arc = rt_mcf_flow_arc.get("T_ms_by_switch", {})
+                    #     # =========================
+                    #     # FLOW RT (SOLVER)
+                    #     # =========================
+                    #     rt_mcf_flow_arc = rt_mcf_arc_solver or {}
+                    #     T_flow_arc = rt_mcf_flow_arc.get("T_ms_by_switch", {})
 
-                        rt_pack_flow_arc = {"resp_by_switch": T_flow_arc}
-                        rtp_flow_arc = _rt_pstats(rt_pack_flow_arc)
-                        rt_max_ms_mcf_flow_arc  = max(T_flow_arc.values())                    
-                        rt_mean_ms_mcf_flow_arc = (
-                                        sum(T_flow_arc.values()) / len(T_flow_arc)
-                                    ) if T_flow_arc else float("nan")
-                        rt_p95_ms_mcf_flow_arc  = float(rtp_flow_arc["p95"]) if rtp_flow_arc["p95"] == rtp_flow_arc["p95"] else float("nan")
+                    #     rt_pack_flow_arc = {"resp_by_switch": T_flow_arc}
+                    #     rtp_flow_arc = _rt_pstats(rt_pack_flow_arc)
+                    #     rt_max_ms_mcf_flow_arc  = max(T_flow_arc.values())                    
+                    #     rt_mean_ms_mcf_flow_arc = (
+                    #                     sum(T_flow_arc.values()) / len(T_flow_arc)
+                    #                 ) if T_flow_arc else float("nan")
+                    #     rt_p95_ms_mcf_flow_arc  = float(rtp_flow_arc["p95"]) if rtp_flow_arc["p95"] == rtp_flow_arc["p95"] else float("nan")
                         
-                        # =========================
-                        # LINK + LOAD
-                        # =========================
+                    #     # =========================
+                    #     # LINK + LOAD
+                    #     # =========================
 
-                        link_mcf_arc_stats = _link_stats(usage_mcf_arc, edge_caps)
-                        lb_mcf_arc = _ctrl_lb(fl_mcf_arc, capacities, usable_frac=1.0)
+                    #     link_mcf_arc_stats = _link_stats(usage_mcf_arc, edge_caps)
+                    #     lb_mcf_arc = _ctrl_lb(fl_mcf_arc, capacities, usable_frac=1.0)
 
-                        # =========================
-                        # RT STATS (STANDARD)
-                        # =========================
-                        rtp_mcf_arc = _rt_pstats(rt_mcf_std_arc)
+                    #     # =========================
+                    #     # RT STATS (STANDARD)
+                    #     # =========================
+                    #     rtp_mcf_arc = _rt_pstats(rt_mcf_std_arc)
 
-                        rt_mean_ms_mcf_arc = float(rt_mcf_std_arc.get("mean_resp", float("nan")))
-                        rt_p95_ms_mcf_arc  = float(rtp_mcf_arc["p95"]) if rtp_mcf_arc["p95"] == rtp_mcf_arc["p95"] else float("nan")
-                        rt_max_ms_mcf_arc  = float(rt_mcf_std_arc.get("max_resp", float("nan")))
+                    #     rt_mean_ms_mcf_arc = float(rt_mcf_std_arc.get("mean_resp", float("nan")))
+                    #     rt_p95_ms_mcf_arc  = float(rtp_mcf_arc["p95"]) if rtp_mcf_arc["p95"] == rtp_mcf_arc["p95"] else float("nan")
+                    #     rt_max_ms_mcf_arc  = float(rt_mcf_std_arc.get("max_resp", float("nan")))
 
-                        prop_mean_ms_mcf_arc = _mean_prop_ms(rt_mcf_std_arc)
-                        W_mean_ms_mcf_arc    = _mean_W_ms_over_switches(rt_mcf_std_arc, fa_mcf_arc)
+                    #     prop_mean_ms_mcf_arc = _mean_prop_ms(rt_mcf_std_arc)
+                    #     W_mean_ms_mcf_arc    = _mean_W_ms_over_switches(rt_mcf_std_arc, fa_mcf_arc)
 
-                        queue_share_mcf_arc = (
-                            W_mean_ms_mcf_arc / max(1e-9, rt_mean_ms_mcf_arc)
-                        ) if math.isfinite(rt_mean_ms_mcf_arc) else float("nan")
+                    #     queue_share_mcf_arc = (
+                    #         W_mean_ms_mcf_arc / max(1e-9, rt_mean_ms_mcf_arc)
+                    #     ) if math.isfinite(rt_mean_ms_mcf_arc) else float("nan")
 
-                        # =========================
-                        # MIGRATION STATS
-                        # =========================
-                        mig_stats_mcf_arc = _mig_stats(
-                            G_run, init_assign_cs, fa_mcf_arc,
-                            ROUTING_MODE,
-                            rt_init=init_rt,
-                            rt_final=rt_mcf_std_arc
-                        )
+                    #     # =========================
+                    #     # MIGRATION STATS
+                    #     # =========================
+                    #     mig_stats_mcf_arc = _mig_stats(
+                    #         G_run, init_assign_cs, fa_mcf_arc,
+                    #         ROUTING_MODE,
+                    #         rt_init=init_rt,
+                    #         rt_final=rt_mcf_std_arc
+                    #     )
 
-                        mig_mcf_arc = int(mig_stats_mcf_arc.get("count", 0))
+                    #     mig_mcf_arc = int(mig_stats_mcf_arc.get("count", 0))
 
-                        # =========================
-                        # MIGRATION COST
-                        # =========================
+                    #     # =========================
+                    #     # MIGRATION COST
+                    #     # =========================
 
-                        mig_cost_comp_mcf_arc = compute_migration_cost_components(
-                            init_assign=init_assign_cs,
-                            final_assign=fa_mcf_arc,
-                            Dcc=Dcc,
-                            rt_init=init_rt,
-                            rt_final=rt_mcf_std_arc
-                        )
-                        print("MIG DEBUG:",
-                        "num_mig=", mig_cost_comp_mcf_arc["num_mig"],
-                        "cc=", mig_cost_comp_mcf_arc["cc_transfer"],
-                        "delta_rt=", mig_cost_comp_mcf_arc["delta_rt"],
-                        "total=", mig_cost_comp_mcf_arc["total"])
+                    #     mig_cost_comp_mcf_arc = compute_migration_cost_components(
+                    #         init_assign=init_assign_cs,
+                    #         final_assign=fa_mcf_arc,
+                    #         Dcc=Dcc,
+                    #         rt_init=init_rt,
+                    #         rt_final=rt_mcf_std_arc
+                    #     )
+                    #     print("MIG DEBUG:",
+                    #     "num_mig=", mig_cost_comp_mcf_arc["num_mig"],
+                    #     "cc=", mig_cost_comp_mcf_arc["cc_transfer"],
+                    #     "delta_rt=", mig_cost_comp_mcf_arc["delta_rt"],
+                    #     "total=", mig_cost_comp_mcf_arc["total"])
     
-                        # =========================
-                        # PLOT
-                        # =========================
-                        plot_assignments(
-                            G_run, pos, switches, controllers,
-                            init_assign_cs, fa_mcf_arc, loads, fl_mcf_arc,
-                            topo_name, ALG_DIR("MCF_ARC"), capacities,
-                            extra_title=f"MCF_ARC objective={Objective}",
-                            file_tag=f"MCF_ARC_run{RUN_INDEX:03d}_topo{idx:02d}"
-                        )
+                    #     # =========================
+                    #     # PLOT
+                    #     # =========================
+                    #     plot_assignments(
+                    #         G_run, pos, switches, controllers,
+                    #         init_assign_cs, fa_mcf_arc, loads, fl_mcf_arc,
+                    #         topo_name, ALG_DIR("MCF_ARC"), capacities,
+                    #         extra_title=f"MCF_ARC objective={Objective}",
+                    #         file_tag=f"MCF_ARC_run{RUN_INDEX:03d}_topo{idx:02d}"
+                    #     )
 
-                        _assert_dict("link_summary_init", link_sum_init)
-                        _assert_dict("link_summary_final_MCF_ARC", summarize_link_usage(usage_mcf_arc, edge_caps))
+                    #     _assert_dict("link_summary_init", link_sum_init)
+                    #     _assert_dict("link_summary_final_MCF_ARC", summarize_link_usage(usage_mcf_arc, edge_caps))
 
 
 
-                        log_run_to_csv(
-                            logs_dir=RESULTS_FOLDER,
+                    #     log_run_to_csv(
+                    #         logs_dir=RESULTS_FOLDER,
 
-                            algo="MCF_ARC",
+                    #         algo="MCF_ARC",
 
-                            run_index=RUN_INDEX,
-                            topo=topo_name,
-                            nodes=G_run.number_of_nodes(),
+                    #         run_index=RUN_INDEX,
+                    #         topo=topo_name,
+                    #         nodes=G_run.number_of_nodes(),
 
-                            loads_by_switch=loads,
-                            controller_set=controllers,
-                            controller_caps=capacities,
+                    #         loads_by_switch=loads,
+                    #         controller_set=controllers,
+                    #         controller_caps=capacities,
 
-                            init_assign=init_assign_cs,
-                            final_assign=fa_mcf_arc,
+                    #         init_assign=init_assign_cs,
+                    #         final_assign=fa_mcf_arc,
 
-                            init_loads_by_ctrl=dict(init_loads_by_ctrl),
-                            final_loads_by_ctrl=fl_mcf_arc,
+                    #         init_loads_by_ctrl=dict(init_loads_by_ctrl),
+                    #         final_loads_by_ctrl=fl_mcf_arc,
 
-                            init_dev=init_dev,
-                            final_dev=max(fl_mcf_arc.values()) - min(fl_mcf_arc.values()) if fl_mcf_arc else 0.0,
+                    #         init_dev=init_dev,
+                    #         final_dev=max(fl_mcf_arc.values()) - min(fl_mcf_arc.values()) if fl_mcf_arc else 0.0,
 
-                            obj_value=obj_mcf_arc,
-                            solve_time_sec=solve_time_mcf_arc,
-                            mip_gap=mip_MCF_arc,
-                            status_msg="SUCCESS",
+                    #         obj_value=obj_mcf_arc,
+                    #         solve_time_sec=solve_time_mcf_arc,
+                    #         mip_gap=mip_MCF_arc,
+                    #         status_msg="SUCCESS",
 
-                            # ---------------- RT (STANDARD) ----------------
-                            rt_mean_init_ms=init_mean_ms_rt,
-                            rt_mean_final_ms=rt_mean_ms_mcf_arc,
+                    #         # ---------------- RT (STANDARD) ----------------
+                    #         rt_mean_init_ms=init_mean_ms_rt,
+                    #         rt_mean_final_ms=rt_mean_ms_mcf_arc,
 
-                            rt_max_init_ms=rt_max_ms_init,
-                            rt_max_final_ms=rt_max_ms_mcf_arc,
+                    #         rt_max_init_ms=rt_max_ms_init,
+                    #         rt_max_final_ms=rt_max_ms_mcf_arc,
 
-                            rt_p95_ms_init=rt_p95_ms_init,
-                            rt_p95_ms_final=rt_p95_ms_mcf_arc,
-                            delta_rt_p95_ms=rt_p95_ms_mcf_arc - rt_p95_ms_init,
+                    #         rt_p95_ms_init=rt_p95_ms_init,
+                    #         rt_p95_ms_final=rt_p95_ms_mcf_arc,
+                    #         delta_rt_p95_ms=rt_p95_ms_mcf_arc - rt_p95_ms_init,
 
-                            # ---------------- CTRL ----------------
-                            ctrl_util_mean_init=lb_init["util_mean"],
-                            ctrl_util_mean_final=lb_mcf_arc["util_mean"],
+                    #         # ---------------- CTRL ----------------
+                    #         ctrl_util_mean_init=lb_init["util_mean"],
+                    #         ctrl_util_mean_final=lb_mcf_arc["util_mean"],
 
-                            ctrl_util_max_init=lb_init["util_max"],
-                            ctrl_util_max_final=lb_mcf_arc["util_max"],
-                            delta_ctrl_util_max=_d(lb_mcf_arc["util_max"], lb_init["util_max"]),
+                    #         ctrl_util_max_init=lb_init["util_max"],
+                    #         ctrl_util_max_final=lb_mcf_arc["util_max"],
+                    #         delta_ctrl_util_max=_d(lb_mcf_arc["util_max"], lb_init["util_max"]),
 
-                            ctrl_util_p95_init=lb_init["util_p95"],
-                            ctrl_util_p95_final=lb_mcf_arc["util_p95"],
+                    #         ctrl_util_p95_init=lb_init["util_p95"],
+                    #         ctrl_util_p95_final=lb_mcf_arc["util_p95"],
 
-                            ctrl_util_std_final=lb_mcf_arc["util_std"],
-                            ctrl_util_cov_final=lb_mcf_arc["util_cov"],
+                    #         ctrl_util_std_final=lb_mcf_arc["util_std"],
+                    #         ctrl_util_cov_final=lb_mcf_arc["util_cov"],
 
-                            jain_load_init=lb_init["jain"],
-                            jain_load_final=lb_mcf_arc["jain"],
+                    #         jain_load_init=lb_init["jain"],
+                    #         jain_load_final=lb_mcf_arc["jain"],
 
-                            ctrl_headroom_p50_final=lb_mcf_arc["head_p50"],
-                            ctrl_headroom_p95_final=lb_mcf_arc["head_p95"],
-                            ctrl_headroom_mean_final=lb_mcf_arc["head_mean"],
+                    #         ctrl_headroom_p50_final=lb_mcf_arc["head_p50"],
+                    #         ctrl_headroom_p95_final=lb_mcf_arc["head_p95"],
+                    #         ctrl_headroom_mean_final=lb_mcf_arc["head_mean"],
 
-                            # ---------------- DELAYS ----------------
-                            prop_mean_ms_final=prop_mean_ms_mcf_arc,
-                            W_mean_ms_final=W_mean_ms_mcf_arc,
+                    #         # ---------------- DELAYS ----------------
+                    #         prop_mean_ms_final=prop_mean_ms_mcf_arc,
+                    #         W_mean_ms_final=W_mean_ms_mcf_arc,
 
-                            unstable_ctrls_final=len(rt_mcf_std_arc.get("unstable_controllers", [])),
+                    #         unstable_ctrls_final=len(rt_mcf_std_arc.get("unstable_controllers", [])),
 
-                            # ---------------- LINK ----------------
-                            link_util_mean_used_final=link_mcf_arc_stats["mean_used"],
-                            link_util_max_final=link_mcf_arc_stats["max"],
-                            link_util_p95_final=link_mcf_arc_stats["p95"],
-                            violated_links_final=link_mcf_arc_stats["viol"],
-                            excess_viol_final=link_mcf_arc_stats["excess"],
+                    #         # ---------------- LINK ----------------
+                    #         link_util_mean_used_final=link_mcf_arc_stats["mean_used"],
+                    #         link_util_max_final=link_mcf_arc_stats["max"],
+                    #         link_util_p95_final=link_mcf_arc_stats["p95"],
+                    #         violated_links_final=link_mcf_arc_stats["viol"],
+                    #         excess_viol_final=link_mcf_arc_stats["excess"],
 
-                            # ---------------- LOAD ----------------
-                            rebalanced_load_total=_rebalanced_total(lam_init, fl_mcf_arc),
+                    #         # ---------------- LOAD ----------------
+                    #         rebalanced_load_total=_rebalanced_total(lam_init, fl_mcf_arc),
 
-                            # ---------------- CONFIG ----------------
-                            alpha=alpha,
-                            beta=beta,
-                            k_paths=k_path_count,
-                            link_sens=sens,
+                    #         # ---------------- CONFIG ----------------
+                    #         alpha=alpha,
+                    #         beta=beta,
+                    #         k_paths=k_path_count,
+                    #         link_sens=sens,
 
-                            # ---------------- MIG ----------------
-                            mig_cost_components=mig_cost_comp_mcf_arc,
-                            mig_dist_mean=mig_stats_mcf_arc["dist_mean"],
-                            mig_dist_p95=mig_stats_mcf_arc["dist_p95"],
+                    #         # ---------------- MIG ----------------
+                    #         mig_cost_components=mig_cost_comp_mcf_arc,
+                    #         mig_dist_mean=mig_stats_mcf_arc["dist_mean"],
+                    #         mig_dist_p95=mig_stats_mcf_arc["dist_p95"],
 
-                            # ---------------- RT MAP ----------------
-                            rt_init_map=T_init,
-                            rt_final_map=rt_mcf_std_arc["T_final_ms_by_switch"],
+                    #         # ---------------- RT MAP ----------------
+                    #         rt_init_map=T_init,
+                    #         rt_final_map=rt_mcf_std_arc["T_final_ms_by_switch"],
 
-                            # ---------------- DELAY BREAKDOWN ----------------
-                            prop_delay_max_ms=rt_mcf_std_arc["prop_max_ms"],
-                            queue_delay_max_ms=max(
-                                v for v in rt_mcf_std_arc["Wsys_by_ctrl"].values()
-                                if math.isfinite(v)
-                            ),
-                            sync_delay_ms=SYNC_DELAY_MS,
+                    #         # ---------------- DELAY BREAKDOWN ----------------
+                    #         prop_delay_max_ms=rt_mcf_std_arc["prop_max_ms"],
+                    #         queue_delay_max_ms=max(
+                    #             v for v in rt_mcf_std_arc["Wsys_by_ctrl"].values()
+                    #             if math.isfinite(v)
+                    #         ),
+                    #         sync_delay_ms=SYNC_DELAY_MS,
 
-                            # ---------------- CTRL RT ----------------
-                            ctrl_rt_mean_ms=rt_mean_ms_mcf_flow_arc,   # 🔥 FLOW RT
-                            ctrl_rt_max_ms=rt_max_ms_mcf_flow_arc,
-                            ctrl_rt_p95_ms=rt_p95_ms_mcf_flow_arc,
-                        )
+                    #         # ---------------- CTRL RT ----------------
+                    #         ctrl_rt_mean_ms=rt_mean_ms_mcf_flow_arc,   # 🔥 FLOW RT
+                    #         ctrl_rt_max_ms=rt_max_ms_mcf_flow_arc,
+                    #         ctrl_rt_p95_ms=rt_p95_ms_mcf_flow_arc,
+                    #     )
 
-                        # ============================================================
-                        # EDGE USAGE CSV — MCF ARC
-                        # ============================================================
-                        write_edge_usage_csv(
-                            out_csv=link_csv_file,
-                            topology=topo_name,
-                            run_index=RUN_INDEX,
-                            phase="SM",
-                            algo="MCF_ARC",
+                    #     # ============================================================
+                    #     # EDGE USAGE CSV — MCF ARC
+                    #     # ============================================================
+                    #     write_edge_usage_csv(
+                    #         out_csv=link_csv_file,
+                    #         topology=topo_name,
+                    #         run_index=RUN_INDEX,
+                    #         phase="SM",
+                    #         algo="MCF_ARC",
 
-                            G=G_run,
-                            usage_routed=usage_mcf_arc,   # ✅ from optimizer
+                    #         G=G_run,
+                    #         usage_routed=usage_mcf_arc,   # ✅ from optimizer
 
-                            edge_caps_uniform=edge_caps_uniform,
-                            edge_caps_before_stress=edge_caps_calibrated,
-                            edge_caps_after_stress=edge_caps_stressed,
+                    #         edge_caps_uniform=edge_caps_uniform,
+                    #         edge_caps_before_stress=edge_caps_calibrated,
+                    #         edge_caps_after_stress=edge_caps_stressed,
 
-                            paths_by_switch=paths_mcf_arc,
+                    #         paths_by_switch=paths_mcf_arc,
 
-                            usage_shortest_init=usage_shortest_init,
-                            usage_routed_init=usage_init_routed,
+                    #         usage_shortest_init=usage_shortest_init,
+                    #         usage_routed_init=usage_init_routed,
 
-                            ebc=ebc,
-                            stressed_edges=stressed_edges,
+                    #         ebc=ebc,
+                    #         stressed_edges=stressed_edges,
 
-                            alpha=alpha,
-                            beta=beta,
-                            link_sens=sens,
-                            k_paths=k_path_count,
-                            load_sens=0.0,
-                            controller_sens=0.0,
-                        )
+                    #         alpha=alpha,
+                    #         beta=beta,
+                    #         link_sens=sens,
+                    #         k_paths=k_path_count,
+                    #         load_sens=0.0,
+                    #         controller_sens=0.0,
+                    #     )
 
-                        # ============================================================
-                        # SWITCH RT CSV — MCF ARC
-                        # ============================================================
-                        write_switch_rt_csv(
-                            switch_csv_file,
-                            topo_name,
-                            RUN_INDEX,
-                            "MCF_ARC",
-                            "SM",
+                    #     # ============================================================
+                    #     # SWITCH RT CSV — MCF ARC
+                    #     # ============================================================
+                    #     write_switch_rt_csv(
+                    #         switch_csv_file,
+                    #         topo_name,
+                    #         RUN_INDEX,
+                    #         "MCF_ARC",
+                    #         "SM",
 
-                            # FINAL assignment + paths
-                            fa_mcf_arc,
-                            paths_mcf_arc,
-                            chosen_paths_init,   # ✅ ADD THIS
+                    #         # FINAL assignment + paths
+                    #         fa_mcf_arc,
+                    #         paths_mcf_arc,
+                    #         chosen_paths_init,   # ✅ ADD THIS
 
-                            # RT DATA (ARC STANDARD RT)
-                            {
-                                # FINAL
-                                "resp_ms_by_switch": rt_mcf_std_arc["T_final_ms_by_switch"],
-                                "prop_ms_by_switch": rt_mcf_std_arc["prop_by_switch"],
-                                "solver_queue_ms_by_ctrl": rt_mcf_arc_solver["queue_ms_by_ctrl"],
-                                "queue_ms_by_ctrl": rt_mcf_std_arc["Wsys_by_ctrl"],
+                    #         # RT DATA (ARC STANDARD RT)
+                    #         {
+                    #             # FINAL
+                    #             "resp_ms_by_switch": rt_mcf_std_arc["T_final_ms_by_switch"],
+                    #             "prop_ms_by_switch": rt_mcf_std_arc["prop_by_switch"],
+                    #             "solver_queue_ms_by_ctrl": rt_mcf_arc_solver["queue_ms_by_ctrl"],
+                    #             "queue_ms_by_ctrl": rt_mcf_std_arc["Wsys_by_ctrl"],
 
-                                # INIT
-                                "init_resp_ms_by_switch": T_init,
-                                "init_prop_ms_by_switch": prop_init,
-                                "init_solver_queue_ms_by_ctrl": W_init,
-                            },
+                    #             # INIT
+                    #             "init_resp_ms_by_switch": T_init,
+                    #             "init_prop_ms_by_switch": prop_init,
+                    #             "init_solver_queue_ms_by_ctrl": W_init,
+                    #         },
 
-                            init_loads_by_switch=BASE_LOADS,
-                            scaled_loads_by_switch=loads,
-                            init_assign_by_switch=init_assign_cs,
+                    #         init_loads_by_switch=BASE_LOADS,
+                    #         scaled_loads_by_switch=loads,
+                    #         init_assign_by_switch=init_assign_cs,
 
-                            load_scale_alpha="0",
+                    #         load_scale_alpha="0",
 
-                            alpha=alpha,
-                            beta=beta,
-                            link_sens=sens,
-                            k_paths=k_path_count,
-                            load_sens=0.0,
-                            controller_sens=0.0,
-                        )
+                    #         alpha=alpha,
+                    #         beta=beta,
+                    #         link_sens=sens,
+                    #         k_paths=k_path_count,
+                    #         load_sens=0.0,
+                    #         controller_sens=0.0,
+                    #     )
 
-                        # ============================================================
-                        # CONTROLLER CSV — MCF ARC
-                        # ============================================================
-                        W_mcf_arc_by_ctrl = rt_mcf_std_arc.get("Wsys_by_ctrl", {})
+                    #     # ============================================================
+                    #     # CONTROLLER CSV — MCF ARC
+                    #     # ============================================================
+                    #     W_mcf_arc_by_ctrl = rt_mcf_std_arc.get("Wsys_by_ctrl", {})
 
-                        switch_W_final_mcf_arc = {
-                            s: W_mcf_arc_by_ctrl.get(fa_mcf_arc[s], 0.0)
-                            for s in fa_mcf_arc
-                        }
+                    #     switch_W_final_mcf_arc = {
+                    #         s: W_mcf_arc_by_ctrl.get(fa_mcf_arc[s], 0.0)
+                    #         for s in fa_mcf_arc
+                    #     }
 
-                        write_controller_csv_reuse_switch_logs(
-                            out_csv=controller_csv_file,
-                            topology=topo_name,
-                            run_index=RUN_INDEX,
-                            algo="MCF_ARC",
-                            phase="SM",
-                            controllers=controllers,
+                    #     write_controller_csv_reuse_switch_logs(
+                    #         out_csv=controller_csv_file,
+                    #         topology=topo_name,
+                    #         run_index=RUN_INDEX,
+                    #         algo="MCF_ARC",
+                    #         phase="SM",
+                    #         controllers=controllers,
 
-                            capacities_init=BASE_CAPACITIES,
-                            capacities_final=capacities,
+                    #         capacities_init=BASE_CAPACITIES,
+                    #         capacities_final=capacities,
 
-                            loads_by_ctrl=fl_mcf_arc,
-                            switch_to_ctrl=fa_mcf_arc,
+                    #         loads_by_ctrl=fl_mcf_arc,
+                    #         switch_to_ctrl=fa_mcf_arc,
 
-                            switch_W_init=W_init,
-                            switch_W_final=switch_W_final_mcf_arc,
+                    #         switch_W_init=W_init,
+                    #         switch_W_final=switch_W_final_mcf_arc,
 
-                            switch_loads=loads,
-                            capacity_threshold=CAPACITY_THRESHOLD,
+                    #         switch_loads=loads,
+                    #         capacity_threshold=CAPACITY_THRESHOLD,
 
-                            alpha=alpha,
-                            beta=beta,
-                            link_sens=sens,
-                            k_paths=k_path_count,
-                            load_sens=0.0,
-                            controller_sens=0.0,
-                        )
+                    #         alpha=alpha,
+                    #         beta=beta,
+                    #         link_sens=sens,
+                    #         k_paths=k_path_count,
+                    #         load_sens=0.0,
+                    #         controller_sens=0.0,
+                    #     )
 
-                        # Every recovery baseline starts from exactly the same
-                        # post-balancing MCF-ARC snapshot.  Rebind the common
-                        # "init" evaluation variables here so baseline metrics,
-                        # plots and CSV logs cannot accidentally refer back to
-                        # the controller-selection assignment.
-                        init_assign_cs = dict(fa_mcf_arc)
-                        init_loads_by_ctrl = dict(fl_mcf_arc)
-                        init_dev = (
-                            max(fl_mcf_arc.values()) - min(fl_mcf_arc.values())
-                            if fl_mcf_arc else 0.0
-                        )
-                        init_rt = rt_mcf_std_arc
-                        init_mean_rt = rt_mean_ms_mcf_arc
-                        init_mean_ms_rt = rt_mean_ms_mcf_arc
-                        rt_max_ms_init = rt_max_ms_mcf_arc
-                        rt_p95_ms_init = rt_p95_ms_mcf_arc
-                        lb_init = lb_mcf_arc
-                        lam_init = dict(fl_mcf_arc)
-                        T_init = dict(rt_mcf_std_arc["T_final_ms_by_switch"])
-                        prop_init = dict(rt_mcf_std_arc["prop_by_switch"])
-                        W_init = dict(rt_mcf_std_arc["Wsys_by_ctrl"])
-                        chosen_paths_init = dict(paths_mcf_arc)
-                        usage_init_routed = dict(usage_mcf_arc)
-                        link_sum_init = summarize_link_usage(usage_mcf_arc, edge_caps)
+                    #     # Every recovery baseline starts from exactly the same
+                    #     # post-balancing MCF-ARC snapshot.  Rebind the common
+                    #     # "init" evaluation variables here so baseline metrics,
+                    #     # plots and CSV logs cannot accidentally refer back to
+                    #     # the controller-selection assignment.
+                    #     init_assign_cs = dict(fa_mcf_arc)
+                    #     init_loads_by_ctrl = dict(fl_mcf_arc)
+                    #     init_dev = (
+                    #         max(fl_mcf_arc.values()) - min(fl_mcf_arc.values())
+                    #         if fl_mcf_arc else 0.0
+                    #     )
+                    #     init_rt = rt_mcf_std_arc
+                    #     init_mean_rt = rt_mean_ms_mcf_arc
+                    #     init_mean_ms_rt = rt_mean_ms_mcf_arc
+                    #     rt_max_ms_init = rt_max_ms_mcf_arc
+                    #     rt_p95_ms_init = rt_p95_ms_mcf_arc
+                    #     lb_init = lb_mcf_arc
+                    #     lam_init = dict(fl_mcf_arc)
+                    #     T_init = dict(rt_mcf_std_arc["T_final_ms_by_switch"])
+                    #     prop_init = dict(rt_mcf_std_arc["prop_by_switch"])
+                    #     W_init = dict(rt_mcf_std_arc["Wsys_by_ctrl"])
+                    #     chosen_paths_init = dict(paths_mcf_arc)
+                    #     usage_init_routed = dict(usage_mcf_arc)
+                    #     link_sum_init = summarize_link_usage(usage_mcf_arc, edge_caps)
 
 # ==========================================================================================================================
                         # ===========BASELINE-1: optimization-only (load-based objective)==============
@@ -1322,7 +1483,7 @@ def main():
                                 G=G_run,
                                 switches=switches,
                                 controllers=controllers,
-                                init_assign=init_assign_cs,   # important
+                                init_assign=init_assign_cs,
                                 loads=loads,
                                 capacities=capacities,
                                 dij=dij,
@@ -1679,7 +1840,7 @@ def main():
                             controllers=controllers,
                             loads=loads,
                             capacities=capacities,
-                            # All baselines start from the same balanced MCF-ARC snapshot.
+                            # All baselines start from the same shortest final assignment.
                             init_assign=init_assign_cs,
                             dij=dij,
                             paths_sc=paths,

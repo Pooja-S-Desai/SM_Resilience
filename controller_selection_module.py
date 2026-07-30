@@ -98,8 +98,8 @@ def _build_feasible_imbalanced_fallback(G, loads, estimated_k, pivot_capacity):
         capacities[hot] = max(1.0, load_hot / target_util)
         overloaded = [hot]
 
-    # Creating the deliberate >90% hot controller must not break the
-    # aggregate 85%-sizing reserve. Put any deficit on another controller.
+    # Creating the deliberate >80% hot controller must not break the
+    # aggregate 80%-sizing reserve. Put any deficit on another controller.
     usable_total = sum(effective_threshold * capacities[c] for c in controllers)
     if usable_total < total_load:
         reserve_controller = next((c for c in reversed(controllers) if c != hot), hot)

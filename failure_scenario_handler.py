@@ -631,6 +631,7 @@ def process_failure_scenario(
     comparison_csv_file: Optional[str] = None,
     make_plot: bool = True,
     file_tag: Optional[str] = None,
+    plot_left_title: str = "Final Association",
 
     # Common comparison/CSV metadata
     master_seed: Optional[int] = None,
@@ -1137,6 +1138,7 @@ def process_failure_scenario(
                 capacity_threshold=overload_threshold,
 
                 file_tag=integral_tag,
+                left_panel_title=plot_left_title,
             )
             # The integral plotting helper writes JPG/PDF/SVG variants.
             record["plot_directory"] = plot_directory
