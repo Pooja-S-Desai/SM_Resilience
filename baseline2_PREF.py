@@ -708,14 +708,6 @@ def draw_assignment_subplot(
                 alpha=0.45,
             )
 
-    nx.draw_networkx_labels(
-        G,
-        pos,
-        labels={n: str(n) for n in G.nodes()},
-        font_size=6,
-        ax=ax,
-    )
-
     ax.axis("off")
 
 

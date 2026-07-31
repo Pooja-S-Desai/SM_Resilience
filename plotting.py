@@ -15,8 +15,6 @@ import matplotlib.patches as mpatches
 from matplotlib.lines import Line2D
 from collections import defaultdict
 
-from adjustText import adjust_text
-
 from helpers import (
     TOPOLOGY_FOLDER,
     TOPOLOGY_LIST_FILE,
@@ -58,6 +56,63 @@ def get_geographical_pos(G):
             pos[node] = (data['Longitude'], data['Latitude'])
 
     return pos
+
+
+# -------------------------------------------------------------
+# Separate markers that overlap only because of their plot size
+# -------------------------------------------------------------
+def separate_nearby_plot_positions(pos, minimum_distance, iterations=80):
+    """Return display positions with a minimum visual separation.
+
+    Geographic coordinates are left untouched.  This helper only nudges the
+    copy used for drawing, so nodes that are distinct but geographically close
+    do not hide one another underneath large circle/controller markers.
+    """
+    adjusted = {
+        node: [float(coords[0]), float(coords[1])]
+        for node, coords in pos.items()
+    }
+    nodes = sorted(adjusted, key=lambda node: str(node))
+
+    if len(nodes) < 2 or minimum_distance <= 0:
+        return {node: tuple(coords) for node, coords in adjusted.items()}
+
+    for _ in range(iterations):
+        moved = False
+
+        for index, first in enumerate(nodes):
+            for second in nodes[index + 1:]:
+                dx = adjusted[second][0] - adjusted[first][0]
+                dy = adjusted[second][1] - adjusted[first][1]
+                distance = math.hypot(dx, dy)
+
+                if distance >= minimum_distance:
+                    continue
+
+                if distance < 1e-12:
+                    # Stable direction for identical display coordinates.
+                    digest = hashlib.sha256(
+                        f"{first}|{second}".encode("utf-8")
+                    ).digest()
+                    angle = (
+                        int.from_bytes(digest[:4], "big")
+                        / float(2**32)
+                    ) * 2.0 * math.pi
+                    ux, uy = math.cos(angle), math.sin(angle)
+                else:
+                    ux, uy = dx / distance, dy / distance
+
+                shift = 0.5 * (minimum_distance - distance)
+                adjusted[first][0] -= ux * shift
+                adjusted[first][1] -= uy * shift
+                adjusted[second][0] += ux * shift
+                adjusted[second][1] += uy * shift
+                moved = True
+
+        if not moved:
+            break
+
+    return {node: tuple(coords) for node, coords in adjusted.items()}
 
 
 # -------------------------------------------------------------
@@ -107,6 +162,12 @@ def plot_assignments(G, pos, switches, controllers,
     span = max(max(xs) - min(xs), max(ys) - min(ys))
 
     node_radius = span * 0.02
+    # A controller square extends farther than a switch circle.  Use a
+    # controller-safe gap so neither kind of marker obscures its neighbour.
+    pos = separate_nearby_plot_positions(
+        pos,
+        minimum_distance=2.8 * node_radius,
+    )
 
 
     # ---------------------------------------------------------
@@ -142,8 +203,6 @@ def plot_assignments(G, pos, switches, controllers,
     # ---------------------------------------------------------
 
     def draw_assignment(ax, assign, loads_map, highlight_migrations=False):
-
-        controller_texts = []
 
         # ------------------------------
         # Draw edges with overload check
@@ -226,19 +285,6 @@ def plot_assignments(G, pos, switches, controllers,
 
                 ax.add_patch(circle)
 
-            # switch label centered
-            ax.text(
-                x,
-                y,
-                str(n),
-                fontsize=10,
-                fontweight='bold',
-                ha='center',
-                va='center',
-                zorder=5
-            )
-
-
         # ------------------------------
         # Draw controllers
         # ------------------------------
@@ -280,46 +326,42 @@ def plot_assignments(G, pos, switches, controllers,
 
 
 
-            # Controller ID (fixed position)
-            ax.text(
-                x,
-                y + square_side/2 + node_radius*0.4,
+            # Keep controller information above the shape.  Include both
+            # lines in collision adjustment so nearby controllers do not
+            # produce overlapping labels.
+            controller_id_label = ax.annotate(
                 f"C{c}",
+                xy=(x, y + square_side/2),
+                xytext=(0, 3),
+                textcoords="offset points",
                 fontsize=11,
                 fontweight='bold',
                 ha='center',
-                va='bottom'
+                va='bottom',
+                zorder=6
             )
 
             # Controller load (slightly higher)
-            load_val = round(loads_map.get(c, 0), 1)
+            load_val = int(round(float(loads_map.get(c, 0))))
 
             cap_c = controller_capacity.get(c, 0) if isinstance(controller_capacity, dict) else controller_capacity
             threshold = delta * cap_c
 
             txt_color = 'red' if load_val > threshold else 'green'
 
-            load_label = ax.text(
-                x,
-                y + square_side/2 + node_radius*1.2,
+            load_label = ax.annotate(
                 f"{load_val}",
+                xy=(x, y + square_side/2),
+                xytext=(0, 20),
+                textcoords="offset points",
                 fontsize=10,
                 ha='center',
                 va='bottom',
-                color=txt_color
+                color=txt_color,
+                zorder=6
             )
 
-            controller_texts.append(load_label)
-           
-
-        # prevent label overlaps
-        adjust_text(
-            controller_texts,
-            ax=ax,
-            expand_points=(1.02,1.05),
-            force_text=0.05,
-            only_move={'texts':'y'}
-        )
+            # Fixed point offsets keep the load above the controller ID.
 
     # ---------------------------------------------------------
     # Draw both plots
@@ -335,9 +377,19 @@ def plot_assignments(G, pos, switches, controllers,
 
     load_dev_init = compute_load_deviation(init_assign, loads)
     load_dev_final = compute_load_deviation(final_assign, loads)
+    display_load_dev_init = int(round(float(load_dev_init)))
+    display_load_dev_final = int(round(float(load_dev_final)))
 
-    ax1.set_title(f"Initial Association\nLoad Dev: {load_dev_init}", fontsize=20)
-    ax2.set_title(f"Final Association\nLoad Dev: {load_dev_final}", fontsize=20)
+    ax1.set_title(
+        f"Initial Association\nLoad Dev: {display_load_dev_init}",
+        fontsize=20,
+        pad=36,
+    )
+    ax2.set_title(
+        f"Final Association\nLoad Dev: {display_load_dev_final}",
+        fontsize=20,
+        pad=36,
+    )
 
 
     # ---------------------------------------------------------
@@ -348,7 +400,13 @@ def plot_assignments(G, pos, switches, controllers,
 
     summary_handles = [
         Line2D([], [], linestyle='none', label=f"Nodes: {num_nodes} | Migrations: {len(migrated)}"),
-        Line2D([], [], linestyle='none', label=f"Load deviation — init: {load_dev_init} | final: {load_dev_final}")
+        Line2D(
+            [], [], linestyle='none',
+            label=(
+                f"Load deviation — init: {display_load_dev_init} | "
+                f"final: {display_load_dev_final}"
+            ),
+        )
     ]
 
     icon_handles = [
@@ -366,7 +424,8 @@ def plot_assignments(G, pos, switches, controllers,
     for c in controllers:
 
         cap_c = controller_capacity.get(c, 0) if isinstance(controller_capacity, dict) else controller_capacity
-        usable = round(delta * cap_c,1)
+        total_capacity = int(round(float(cap_c)))
+        usable = int(round(float(delta * cap_c)))
 
         controller_handles.append(
             Line2D([0],[0],
@@ -374,7 +433,7 @@ def plot_assignments(G, pos, switches, controllers,
                 markerfacecolor=controller_colors[c],
                 markeredgecolor='black',
                 markersize=12,
-                label=f"C{c}: total={cap_c}, usable={usable}"
+                label=f"C{c}: total={total_capacity}, usable={usable}"
             )
         )
 
@@ -480,6 +539,10 @@ def plot_final_vs_recovery_assignment(
     xs, ys = zip(*pos2.values())
     span = max(max(xs) - min(xs), max(ys) - min(ys))
     node_radius = span * 0.02
+    pos2 = separate_nearby_plot_positions(
+        pos2,
+        minimum_distance=2.8 * node_radius,
+    )
 
     color_list = list(mcolors.TABLEAU_COLORS.values()) + list(mcolors.CSS4_COLORS.values())
     controller_colors = {
@@ -532,8 +595,6 @@ def plot_final_vs_recovery_assignment(
         )
 
     def draw_one(ax, assign, loads_map, active_ctrls, is_recovery=False):
-        controller_texts = []
-
         nx.draw_networkx_edges(
             G, pos2, ax=ax,
             edge_color="black",
@@ -609,15 +670,6 @@ def plot_final_vs_recovery_assignment(
             )
             ax.add_patch(circle)
 
-            ax.text(
-                x, y, str(n),
-                fontsize=10,
-                fontweight="bold",
-                ha="center",
-                va="center",
-                zorder=5
-            )
-
         circle_diameter = 2 * node_radius
         square_side = 1.2 * circle_diameter
 
@@ -652,47 +704,50 @@ def plot_final_vs_recovery_assignment(
             )
             ax.add_patch(circle)
 
-            ax.text(
-                x,
-                y + square_side / 2 + node_radius * 0.4,
+            controller_id_label = ax.annotate(
                 f"C{c}",
+                xy=(x, y + square_side / 2),
+                xytext=(0, 3),
+                textcoords="offset points",
                 fontsize=11,
                 fontweight="bold",
                 ha="center",
-                va="bottom"
+                va="bottom",
+                zorder=6
             )
 
             raw_load_val = float(loads_map.get(c, 0))
-            load_val = math.ceil(raw_load_val) if integer_load_labels else round(raw_load_val, 1)
+            # Plot loads as whole values in every recovery variant.  FT-FSM
+            # retains its conservative ceiling; integral plots use nearest
+            # integer because their loads are normally already whole-valued.
+            load_val = (
+                math.ceil(raw_load_val)
+                if integer_load_labels
+                else int(round(raw_load_val))
+            )
             cap_c = controller_capacity.get(c, 0) if isinstance(controller_capacity, dict) else controller_capacity
             threshold = float(capacity_threshold) * cap_c
             txt_color = "red" if load_val > threshold else "green"
 
-            load_label = ax.text(
-                x,
-                y + square_side / 2 + node_radius * 1.2,
+            load_label = ax.annotate(
                 f"{load_val}",
+                xy=(x, y + square_side / 2),
+                xytext=(0, 20),
+                textcoords="offset points",
                 fontsize=10,
                 ha="center",
                 va="bottom",
                 color=txt_color,
                 fontweight="bold"
             )
-            controller_texts.append(load_label)
+            # Backup and existing controllers deliberately use this same
+            # fixed label layout.
 
         if not is_recovery:
             draw_failed_controller_box(ax, square_side)
 
         if is_recovery:
             draw_failed_controller_box(ax, square_side)
-
-        adjust_text(
-            controller_texts,
-            ax=ax,
-            expand_points=(1.02, 1.05),
-            force_text=0.05,
-            only_move={"texts": "y"}
-        )
 
     load_dev_final = compute_load_deviation(final_assign, loads)
     load_dev_recovery = compute_load_deviation(recovery_assign, loads)
@@ -711,18 +766,29 @@ def plot_final_vs_recovery_assignment(
     draw_one(ax1, final_assign, final_loads, original_controllers, is_recovery=False)
     draw_one(ax2, recovery_assign, recovery_loads, active_recovery_controllers, is_recovery=True)
 
-    ax1.set_title(f"{left_panel_title}\nLoad Dev: {load_dev_final}", fontsize=20)
+    display_load_dev_final = int(round(float(load_dev_final)))
+    display_load_dev_recovery = int(round(float(load_dev_recovery)))
+
+    ax1.set_title(
+        f"{left_panel_title}\nLoad Dev: {display_load_dev_final}",
+        fontsize=20,
+        pad=36,
+    )
     ax2.set_title(
         f"Planned Recovery Association Failure of C{failed_controller}\n"
-        f"Load Dev: {load_dev_recovery}",
-        fontsize=20
+        f"Load Dev: {display_load_dev_recovery}",
+        fontsize=20,
+        pad=36,
     )
 
     summary_handles = [
         Line2D([], [], linestyle="none",
                label=f"Nodes: {G.number_of_nodes()} | Failed Controller: C{failed_controller}"),
         Line2D([], [], linestyle="none",
-               label=f"Load deviation — final: {load_dev_final} | recovery: {load_dev_recovery}")
+               label=(
+                   f"Load deviation — final: {display_load_dev_final} | "
+                   f"recovery: {display_load_dev_recovery}"
+               ))
     ]
     if migration_count is not None:
         summary_handles.append(
@@ -765,7 +831,12 @@ def plot_final_vs_recovery_assignment(
 
         cap_c = controller_capacity.get(c, 0) if isinstance(controller_capacity, dict) else controller_capacity
         usable_value = float(capacity_threshold) * cap_c
-        usable = math.ceil(usable_value) if integer_load_labels else round(usable_value, 1)
+        usable = (
+            math.ceil(usable_value)
+            if integer_load_labels
+            else int(round(usable_value))
+        )
+        total_capacity = int(round(float(cap_c)))
 
         suffix = " New Backup" if c == backup_controller else ""
 
@@ -776,7 +847,7 @@ def plot_final_vs_recovery_assignment(
                    markerfacecolor=controller_colors[c],
                    markeredgecolor="black",
                    markersize=12,
-                   label=f"C{c}{suffix}: total={round(cap_c,1)}, usable={usable}")
+                   label=f"C{c}{suffix}: total={total_capacity}, usable={usable}")
         )
 
     fig.legend(
@@ -962,14 +1033,6 @@ def _plot_fractional_pie_legacy(
                 ax=ax_left,
             )
 
-    nx.draw_networkx_labels(
-        G,
-        pos,
-        labels={node: str(node) for node in G.nodes()},
-        font_size=7,
-        ax=ax_left,
-    )
-
     ax_left.set_title(
         f"Current assignment before failure of C{failed_controller}"
     )
@@ -1063,14 +1126,6 @@ def _plot_fractional_pie_legacy(
                 linewidths=1.0,
                 ax=ax_right,
             )
-
-    nx.draw_networkx_labels(
-        G,
-        pos,
-        labels={node: str(node) for node in G.nodes()},
-        font_size=7,
-        ax=ax_right,
-    )
 
     ax_right.set_title(
         f"Fractional recovery after failure of C{failed_controller}"
