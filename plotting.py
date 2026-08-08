@@ -162,11 +162,13 @@ def plot_assignments(G, pos, switches, controllers,
     span = max(max(xs) - min(xs), max(ys) - min(ys))
 
     node_radius = span * 0.02
-    # A controller square extends farther than a switch circle.  Use a
-    # controller-safe gap so neither kind of marker obscures its neighbour.
+    # A controller square extends farther than a switch circle.  Keep a small
+    # visible gap between nearby markers so the link joining colocated sites
+    # remains readable.  Only this drawing copy is moved; geographic
+    # colocation in the topology is unchanged.
     pos = separate_nearby_plot_positions(
         pos,
-        minimum_distance=2.8 * node_radius,
+        minimum_distance=3.2 * node_radius,
     )
 
 
@@ -254,18 +256,18 @@ def plot_assignments(G, pos, switches, controllers,
                 left_half = mpatches.Wedge(
                     (x, y), node_radius,
                     90, 270,
-                    facecolor=old_color,
-                    edgecolor='black',
-                    linewidth=1.2,
+                    facecolor='white',
+                    edgecolor=old_color,
+                    linewidth=2.5,
                     zorder=3
                 )
 
                 right_half = mpatches.Wedge(
                     (x, y), node_radius,
                     270, 90,
-                    facecolor=new_color,
-                    edgecolor='black',
-                    linewidth=1.2,
+                    facecolor='white',
+                    edgecolor=new_color,
+                    linewidth=2.5,
                     zorder=3
                 )
 
@@ -277,9 +279,9 @@ def plot_assignments(G, pos, switches, controllers,
                 circle = mpatches.Circle(
                     (x, y),
                     node_radius,
-                    facecolor=controller_colors[c],
-                    edgecolor='black',
-                    linewidth=1.2,
+                    facecolor='white',
+                    edgecolor=controller_colors[c],
+                    linewidth=2.5,
                     zorder=3
                 )
 
@@ -305,10 +307,9 @@ def plot_assignments(G, pos, switches, controllers,
                 (x - square_side/2, y - square_side/2),
                 square_side,
                 square_side,
-                facecolor=controller_colors[c],
-                edgecolor='black',
-                linewidth=1.5,
-                alpha=0.9,
+                facecolor='white',
+                edgecolor=controller_colors[c],
+                linewidth=3.0,
                 zorder=2
             )
             ax.add_patch(square)
@@ -317,9 +318,9 @@ def plot_assignments(G, pos, switches, controllers,
             circle = mpatches.Circle(
                 (x, y),
                 node_radius,
-                facecolor=controller_colors[c],
-                edgecolor='black',
-                linewidth=1.2,
+                facecolor='white',
+                edgecolor=controller_colors[c],
+                linewidth=2.5,
                 zorder=3
             )
             ax.add_patch(circle)
@@ -411,11 +412,13 @@ def plot_assignments(G, pos, switches, controllers,
 
     icon_handles = [
         Line2D([0],[0], marker='s', linestyle='', color='w',
-               markerfacecolor='lightgray', markeredgecolor='black',
+               markerfacecolor='white', markeredgecolor='gray',
+               markeredgewidth=2.5,
                markersize=12, label='Controller (Square)'),
 
         Line2D([0],[0], marker='o', linestyle='', color='w',
-               markerfacecolor='gray', markeredgecolor='black',
+               markerfacecolor='white', markeredgecolor='gray',
+               markeredgewidth=2.5,
                markersize=10, label='Switch (Circle)')
     ]
 
@@ -430,8 +433,9 @@ def plot_assignments(G, pos, switches, controllers,
         controller_handles.append(
             Line2D([0],[0],
                 marker='s', linestyle='',
-                markerfacecolor=controller_colors[c],
-                markeredgecolor='black',
+                markerfacecolor='white',
+                markeredgecolor=controller_colors[c],
+                markeredgewidth=2.5,
                 markersize=12,
                 label=f"C{c}: total={total_capacity}, usable={usable}"
             )
@@ -541,7 +545,7 @@ def plot_final_vs_recovery_assignment(
     node_radius = span * 0.02
     pos2 = separate_nearby_plot_positions(
         pos2,
-        minimum_distance=2.8 * node_radius,
+        minimum_distance=3.2 * node_radius,
     )
 
     color_list = list(mcolors.TABLEAU_COLORS.values()) + list(mcolors.CSS4_COLORS.values())
@@ -656,16 +660,16 @@ def plot_final_vs_recovery_assignment(
             c = assign.get(n, final_assign.get(n))
 
             if (not is_recovery) and n in failed_orphan_switches:
-                face = "white"
+                outline_color = "red"
             else:
-                face = controller_colors.get(c, "lightgray")
+                outline_color = controller_colors.get(c, "gray")
 
             circle = mpatches.Circle(
                 (x, y),
                 node_radius,
-                facecolor=face,
-                edgecolor="black",
-                linewidth=1.2,
+                facecolor="white",
+                edgecolor=outline_color,
+                linewidth=2.5,
                 zorder=3
             )
             ax.add_patch(circle)
@@ -686,10 +690,9 @@ def plot_final_vs_recovery_assignment(
                 (x - square_side / 2, y - square_side / 2),
                 square_side,
                 square_side,
-                facecolor=controller_colors[c],
-                edgecolor="black",
-                linewidth=1.5,
-                alpha=0.9,
+                facecolor="white",
+                edgecolor=controller_colors[c],
+                linewidth=3.0,
                 zorder=2
             )
             ax.add_patch(square)
@@ -697,9 +700,9 @@ def plot_final_vs_recovery_assignment(
             circle = mpatches.Circle(
                 (x, y),
                 node_radius,
-                facecolor=controller_colors[c],
-                edgecolor="black",
-                linewidth=1.2,
+                facecolor="white",
+                edgecolor=controller_colors[c],
+                linewidth=2.5,
                 zorder=3
             )
             ax.add_patch(circle)
@@ -797,10 +800,12 @@ def plot_final_vs_recovery_assignment(
 
     icon_handles = [
         Line2D([0], [0], marker="s", linestyle="", color="w",
-               markerfacecolor="lightgray", markeredgecolor="black",
+               markerfacecolor="white", markeredgecolor="gray",
+               markeredgewidth=2.5,
                markersize=12, label="Controller (Square)"),
         Line2D([0], [0], marker="o", linestyle="", color="w",
-               markerfacecolor="gray", markeredgecolor="black",
+               markerfacecolor="white", markeredgecolor="gray",
+               markeredgewidth=2.5,
                markersize=10, label="Switch (Circle)"),
         Line2D([0], [0], marker="s", linestyle="--", color="red",
                markerfacecolor="white", markeredgecolor="red",
@@ -844,8 +849,9 @@ def plot_final_vs_recovery_assignment(
             Line2D([0], [0],
                    marker="s",
                    linestyle="",
-                   markerfacecolor=controller_colors[c],
-                   markeredgecolor="black",
+                   markerfacecolor="white",
+                   markeredgecolor=controller_colors[c],
+                   markeredgewidth=2.5,
                    markersize=12,
                    label=f"C{c}{suffix}: total={total_capacity}, usable={usable}")
         )
