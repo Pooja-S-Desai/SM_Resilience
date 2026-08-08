@@ -327,18 +327,15 @@ def plot_assignments(G, pos, switches, controllers,
 
 
 
-            # Keep controller information above the shape.  Include both
-            # lines in collision adjustment so nearby controllers do not
-            # produce overlapping labels.
+            # Keep the controller identifier inside its circle so every
+            # controller is immediately identifiable from the node itself.
             controller_id_label = ax.annotate(
                 f"C{c}",
-                xy=(x, y + square_side/2),
-                xytext=(0, 3),
-                textcoords="offset points",
+                xy=(x, y),
                 fontsize=11,
                 fontweight='bold',
                 ha='center',
-                va='bottom',
+                va='center',
                 zorder=6
             )
 
@@ -353,7 +350,7 @@ def plot_assignments(G, pos, switches, controllers,
             load_label = ax.annotate(
                 f"{load_val}",
                 xy=(x, y + square_side/2),
-                xytext=(0, 20),
+                xytext=(0, 3),
                 textcoords="offset points",
                 fontsize=10,
                 ha='center',
@@ -586,6 +583,31 @@ def plot_final_vs_recovery_assignment(
         )
         ax.add_patch(failed_box)
 
+        # Use the same inner circle and centred identifier as every active
+        # controller, while retaining the red dashed failure styling.
+        failed_circle = mpatches.Circle(
+            (x, y),
+            node_radius,
+            facecolor="white",
+            edgecolor="red",
+            linewidth=2.5,
+            linestyle="--",
+            zorder=3
+        )
+        ax.add_patch(failed_circle)
+
+        ax.text(
+            x,
+            y,
+            f"C{failed_controller}",
+            fontsize=11,
+            fontweight="bold",
+            color="red",
+            ha="center",
+            va="center",
+            zorder=8
+        )
+
         ax.text(
             x,
             y + square_side / 2 + node_radius * 1.3,
@@ -709,13 +731,11 @@ def plot_final_vs_recovery_assignment(
 
             controller_id_label = ax.annotate(
                 f"C{c}",
-                xy=(x, y + square_side / 2),
-                xytext=(0, 3),
-                textcoords="offset points",
+                xy=(x, y),
                 fontsize=11,
                 fontweight="bold",
                 ha="center",
-                va="bottom",
+                va="center",
                 zorder=6
             )
 
@@ -735,7 +755,7 @@ def plot_final_vs_recovery_assignment(
             load_label = ax.annotate(
                 f"{load_val}",
                 xy=(x, y + square_side / 2),
-                xytext=(0, 20),
+                xytext=(0, 3),
                 textcoords="offset points",
                 fontsize=10,
                 ha="center",
